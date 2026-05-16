@@ -81,7 +81,8 @@ impl Cli {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let file_config = match &cli.config {
@@ -91,35 +92,23 @@ fn main() -> Result<()> {
 
     let config = Config::resolve(file_config, cli.overrides())?;
 
-    // Phase 0: report the resolved configuration. Posting lands in phase 3.
-    println!(
-        "pesto {} — resolved configuration:",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!(
-        "  server      : {}:{} (ssl: {})",
-        config.host, config.port, config.ssl
-    );
-    println!("  connections : {}", config.connections);
-    println!(
-        "  auth        : {}",
-        if config.username.is_some() {
-            "set"
-        } else {
-            "none"
-        }
-    );
-    println!("  from        : {}", config.from);
-    println!("  groups      : {}", config.groups.join(", "));
-    println!("  article size: {} bytes", config.article_size);
-    println!("  files       : {}", cli.files.len());
-    for file in &cli.files {
-        println!("    - {}", file.display());
-    }
-    if let Some(out) = &cli.out {
-        println!("  nzb output  : {}", out.display());
-    }
-    println!("\nposting is not implemented yet — see ROADMAP.md");
+    let outcome = pesto::poster::post_files(&config, &cli.files).await?;
 
+    println!("posted {} segment(s)", outcome.segments.len());
+    if !outcome.failures.is_empty() {
+        eprintln!("{} segment(s) failed:", outcome.failures.len());
+        for failure in &outcome.failures {
+            eprintln!("  - {failure}");
+        }
+    }
+
+    // `.nzb` generation lands in ROADMAP.md phase 4.
+    if let Some(out) = &cli.out {
+        println!("nzb output ({}) — pending phase 4", out.display());
+    }
+
+    if !outcome.failures.is_empty() {
+        std::process::exit(1);
+    }
     Ok(())
 }

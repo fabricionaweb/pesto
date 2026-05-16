@@ -8,4 +8,5 @@ pub mod article;
 pub mod config;
 pub mod nntp;
 pub mod nzb;
+pub mod poster;
 pub mod yenc;

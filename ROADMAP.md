@@ -27,13 +27,13 @@ Each phase must leave the program in a working, testable state.
       `Message-ID`) + yEnc body
 - [x] Unique `Message-ID` generation per segment
 
-## Phase 3 — Parallel posting
+## Phase 3 — Parallel posting ✅
 
-- [ ] Pool of N concurrent TLS connections (`tokio`)
-- [ ] Work queue: segments distributed across connections
-- [ ] Retry of failed segments
-- [ ] Progress bar / throughput in the terminal
-- [ ] Flags `--connections`, `--ssl`, `--groups`
+- [x] Pool of N concurrent TLS connections (`tokio`)
+- [x] Work queue: segments distributed across connections
+- [x] Retry of failed segments
+- [x] Progress bar / throughput in the terminal
+- [x] Flags `--connections`, `--ssl`, `--groups`
 
 ## Phase 4 — `.nzb` generation
 

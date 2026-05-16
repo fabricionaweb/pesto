@@ -78,7 +78,7 @@ pub struct Overrides {
 }
 
 /// Fully resolved, validated configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
