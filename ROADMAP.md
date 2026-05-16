@@ -3,13 +3,13 @@
 Fast, lean Usenet poster in Rust. Inspired by `nyuu`, with only the essentials.
 Each phase must leave the program in a working, testable state.
 
-## Phase 0 — Foundation
+## Phase 0 — Foundation ✅
 
-- [ ] `cargo init` with `main.rs` + `lib.rs`
-- [ ] Module skeleton (`config`, `yenc`, `nntp`, `article`, `nzb`)
-- [ ] CLI parsing with `clap`
-- [ ] TOML config loading + merge with flags
-- [ ] Basic CI (`fmt`, `clippy`, `test`)
+- [x] `cargo init` with `main.rs` + `lib.rs`
+- [x] Module skeleton (`config`, `yenc`, `nntp`, `article`, `nzb`)
+- [x] CLI parsing with `clap`
+- [x] TOML config loading + merge with flags
+- [x] Basic CI (`fmt`, `clippy`, `test`)
 
 ## Phase 1 — yEnc encoding
 
