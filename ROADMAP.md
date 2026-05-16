@@ -35,11 +35,11 @@ Each phase must leave the program in a working, testable state.
 - [x] Progress bar / throughput in the terminal
 - [x] Flags `--connections`, `--ssl`, `--groups`
 
-## Phase 4 — `.nzb` generation
+## Phase 4 — `.nzb` generation ✅
 
-- [ ] Collect `Message-ID`s, sizes and CRCs of posted segments
-- [ ] Write a valid `.nzb` XML file (nzb DTD)
-- [ ] Flag `--out` for the `.nzb` path
+- [x] Collect `Message-ID`s, sizes and CRCs of posted segments
+- [x] Write a valid `.nzb` XML file (nzb DTD)
+- [x] Flag `--out` for the `.nzb` path
 
 ## Phase 5 — MVP polish
 

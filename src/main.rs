@@ -1,12 +1,11 @@
 //! `pesto` — fast, lean Usenet poster.
 //!
-//! Phase 0 binary: parses the CLI, loads and resolves the configuration, and
-//! reports the resolved settings. Posting itself arrives in later phases (see
-//! ROADMAP.md).
+//! Parses the CLI, resolves the configuration, posts the given files to Usenet
+//! and writes an `.nzb` file describing the result.
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use pesto::config::{Config, FileConfig, Overrides};
 
@@ -102,9 +101,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    // `.nzb` generation lands in ROADMAP.md phase 4.
     if let Some(out) = &cli.out {
-        println!("nzb output ({}) — pending phase 4", out.display());
+        if outcome.segments.is_empty() {
+            eprintln!("no segments posted — skipping nzb output");
+        } else {
+            let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments);
+            tokio::fs::write(out, xml)
+                .await
+                .with_context(|| format!("writing nzb file `{}`", out.display()))?;
+            println!("wrote nzb: {}", out.display());
+        }
     }
 
     if !outcome.failures.is_empty() {
