@@ -49,6 +49,8 @@ pub struct PostOutcome {
     pub segments: Vec<PostedSegment>,
     /// Human-readable description of each segment that could not be posted.
     pub failures: Vec<String>,
+    /// True if posting stopped early because of a Ctrl-C interruption.
+    pub cancelled: bool,
 }
 
 /// Metadata about one input file.
@@ -102,6 +104,8 @@ struct Shared {
     results: Mutex<Vec<PostedSegment>>,
     failures: Mutex<Vec<String>>,
     progress: Progress,
+    /// Set when a Ctrl-C interrupt asks workers to stop taking new segments.
+    cancelled: AtomicBool,
 }
 
 /// Post every file in `files` to the groups configured in `config`.
@@ -150,7 +154,20 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         results: Mutex::new(Vec::new()),
         failures: Mutex::new(Vec::new()),
         progress: Progress::new(total_segments),
+        cancelled: AtomicBool::new(false),
     });
+
+    // Ask workers to stop taking new segments on the first Ctrl-C; in-flight
+    // segments still finish so the resulting .nzb stays consistent.
+    let cancel_handle = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                shared.cancelled.store(true, Ordering::Relaxed);
+                eprintln!("\ninterrupt received — finishing in-flight segments...");
+            }
+        })
+    };
 
     let done = Arc::new(AtomicBool::new(false));
     let monitor_handle = tokio::spawn(monitor(shared.clone(), done.clone()));
@@ -165,12 +182,18 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
 
     done.store(true, Ordering::Relaxed);
     let _ = monitor_handle.await;
+    cancel_handle.abort();
 
     let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
     let failures = std::mem::take(&mut *shared.failures.lock().unwrap());
+    let cancelled = shared.cancelled.load(Ordering::Relaxed);
 
-    Ok(PostOutcome { segments, failures })
+    Ok(PostOutcome {
+        segments,
+        failures,
+        cancelled,
+    })
 }
 
 /// Split every file into segments and flatten them into a work list.
@@ -209,6 +232,9 @@ async fn worker(shared: Arc<Shared>) {
     let mut open: Option<(usize, File)> = None;
 
     loop {
+        if shared.cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         let item = match shared.queue.lock().unwrap().pop() {
             Some(item) => item,
             None => break,
@@ -310,9 +336,13 @@ async fn read_item(
         *open = Some((item.file_index, file));
     }
     let file = &mut open.as_mut().expect("file opened above").1;
-    file.seek(SeekFrom::Start(item.offset)).await?;
+    file.seek(SeekFrom::Start(item.offset))
+        .await
+        .with_context(|| format!("seeking in `{}`", meta.path.display()))?;
     let mut buf = vec![0u8; item.len];
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)
+        .await
+        .with_context(|| format!("reading `{}`", meta.path.display()))?;
     Ok(buf)
 }
 

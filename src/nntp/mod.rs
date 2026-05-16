@@ -98,7 +98,10 @@ impl Connection {
 
         let resp = self.send_command("AUTHINFO PASS ", password).await?;
         if resp.code != 281 {
-            bail!("authentication failed: {}", resp.code);
+            bail!(
+                "authentication rejected by server (code {}); check the configured username and password",
+                resp.code
+            );
         }
         Ok(())
     }

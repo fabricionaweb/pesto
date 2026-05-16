@@ -94,6 +94,9 @@ async fn main() -> Result<()> {
     let outcome = pesto::poster::post_files(&config, &cli.files).await?;
 
     println!("posted {} segment(s)", outcome.segments.len());
+    if outcome.cancelled {
+        eprintln!("interrupted — stopped before posting every requested segment");
+    }
     if !outcome.failures.is_empty() {
         eprintln!("{} segment(s) failed:", outcome.failures.len());
         for failure in &outcome.failures {
@@ -113,6 +116,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Exit codes: 130 for an interrupt, 1 for any failed segment, 0 otherwise.
+    if outcome.cancelled {
+        std::process::exit(130);
+    }
     if !outcome.failures.is_empty() {
         std::process::exit(1);
     }

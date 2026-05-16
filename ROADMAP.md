@@ -41,12 +41,14 @@ Each phase must leave the program in a working, testable state.
 - [x] Write a valid `.nzb` XML file (nzb DTD)
 - [x] Flag `--out` for the `.nzb` path
 
-## Phase 5 — MVP polish
+## Phase 5 — MVP polish ✅
 
-- [ ] Actionable error messages (network, auth, I/O)
-- [ ] Ctrl-C handling / clean shutdown
-- [ ] `README` with usage examples
-- [ ] End-to-end integration test (mock NNTP)
+- [x] Actionable error messages (network, auth, I/O)
+- [x] Ctrl-C handling / clean shutdown
+- [x] `README` with usage examples
+- [x] End-to-end integration test (mock NNTP)
+
+**The MVP is complete.** `pesto` posts files to Usenet and writes an `.nzb`.
 
 ## Phase 6 — `upapasta` integration
 
