@@ -18,14 +18,14 @@ Each phase must leave the program in a working, testable state.
 - [x] File segmentation into parts (`=ypart` for multi-part)
 - [x] Tests against known yEnc vectors
 
-## Phase 2 — NNTP client
+## Phase 2 — NNTP client ✅
 
-- [ ] TCP + TLS connection (`rustls`) on port 563
-- [ ] Handshake and `AUTHINFO USER/PASS` authentication
-- [ ] `POST` command (article upload, handling of 240/441 responses)
-- [ ] Article assembly: headers (`Subject`, `From`, `Newsgroups`,
+- [x] TCP + TLS connection (`rustls`) on port 563
+- [x] Handshake and `AUTHINFO USER/PASS` authentication
+- [x] `POST` command (article upload, handling of 240/441 responses)
+- [x] Article assembly: headers (`Subject`, `From`, `Newsgroups`,
       `Message-ID`) + yEnc body
-- [ ] Unique `Message-ID` generation per segment
+- [x] Unique `Message-ID` generation per segment
 
 ## Phase 3 — Parallel posting
 
