@@ -1,0 +1,552 @@
+//! Progress reporting.
+//!
+//! The poster never writes to the terminal directly. Instead it emits
+//! [`ProgressEvent`]s on a channel, which keeps `pesto` usable as a library:
+//! an embedding application (e.g. `upapasta`) drains the channel and renders
+//! progress however it likes, while the `pesto` binary installs the built-in
+//! [`spawn_terminal_renderer`] panel.
+//!
+//! Events flow over an *unbounded* channel so emitting one never blocks the
+//! hot posting path; dropping the receiver simply makes emission a no-op.
+
+use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
+
+/// Sender half of the progress channel handed to the poster.
+pub type ProgressSender = UnboundedSender<ProgressEvent>;
+/// Receiver half drained by a renderer or an embedding application.
+pub type ProgressReceiver = UnboundedReceiver<ProgressEvent>;
+
+/// What kind of run is producing events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// Files are encoded and posted over NNTP.
+    Post,
+    /// Files are processed but never sent over the network.
+    DryRun,
+    /// Only PAR2 parity files are generated, written next to the sources.
+    Par2Only,
+}
+
+/// One file in the run, as announced by [`ProgressEvent::Started`].
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    pub segments: u64,
+    pub bytes: u64,
+}
+
+/// An observable step of a posting run.
+///
+/// The stream always opens with [`Started`](ProgressEvent::Started) and ends
+/// with [`Finished`](ProgressEvent::Finished); everything in between is
+/// incremental. The channel closing is equivalent to `Finished`.
+#[derive(Debug, Clone)]
+pub enum ProgressEvent {
+    /// The run begins. Carries the full work plan.
+    Started {
+        mode: RunMode,
+        files: Vec<FileEntry>,
+        /// Number of NNTP connections / worker threads (0 for `--par2-only`).
+        connections: usize,
+        /// `host:port` of the NNTP server, or `None` when not posting.
+        target: Option<String>,
+    },
+    /// Worker connection `conn` started posting a segment of `file`.
+    ConnectionBusy { conn: usize, file: String },
+    /// Worker connection `conn` drained the queue and stopped.
+    ConnectionIdle { conn: usize },
+    /// One segment of `file` finished; `bytes` is its raw payload size.
+    /// `ok` is false when the segment failed every retry.
+    SegmentDone { file: String, bytes: u64, ok: bool },
+    /// Extra work was appended to the queue — the PAR2 files, which only
+    /// exist once the data pass has computed parity.
+    QueueExtended { file: String, segments: u64, bytes: u64 },
+    /// A short human-readable status note (empty string clears it).
+    Status { text: String },
+    /// A segment failed permanently after exhausting its retries.
+    Failed { description: String },
+    /// Ctrl-C was received; the run is winding down.
+    Interrupted,
+    /// Terminal event: the run is over.
+    Finished,
+}
+
+/// Spawn the built-in terminal renderer used by the `pesto` binary.
+///
+/// Returns the [`ProgressSender`] to hand to the poster and the renderer's
+/// [`JoinHandle`], which the caller awaits once posting has returned. On a
+/// real TTY it draws an in-place multi-line panel; otherwise it prints plain,
+/// scroll-friendly status lines suitable for logs and CI.
+pub fn spawn_terminal_renderer() -> (ProgressSender, JoinHandle<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = tokio::spawn(render_loop(rx));
+    (tx, handle)
+}
+
+/// Width, in characters, of the panel box interior.
+const BODY_W: usize = 44;
+/// Above this connection count the per-connection grid is replaced by a
+/// one-line summary, so the panel never grows unbounded.
+const GRID_LIMIT: usize = 12;
+
+async fn render_loop(mut rx: ProgressReceiver) {
+    let tty = std::io::stderr().is_terminal();
+    let mut state = RenderState::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(200));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                None | Some(ProgressEvent::Finished) => {
+                    state.finished = true;
+                    if tty {
+                        state.draw_panel(true);
+                    } else {
+                        state.draw_plain(true);
+                    }
+                    break;
+                }
+                Some(ev) => state.apply(ev),
+            },
+            _ = ticker.tick() => {
+                if tty {
+                    state.draw_panel(false);
+                } else {
+                    state.draw_plain(false);
+                }
+            }
+        }
+    }
+}
+
+/// Mutable view the renderer builds up from the event stream.
+struct RenderState {
+    started: bool,
+    finished: bool,
+    mode: RunMode,
+    target: Option<String>,
+    start: Instant,
+    total_segments: u64,
+    total_bytes: u64,
+    done_segments: u64,
+    done_bytes: u64,
+    failures: u64,
+    interrupted: bool,
+    status: String,
+    /// File currently posted by each worker connection (`None` = idle).
+    conn_files: Vec<Option<String>>,
+    /// Per-file `(done, total)` segment counts, for the file tally.
+    files: HashMap<String, (u64, u64)>,
+    /// Lines emitted by the previous panel draw, to be cleared on the next.
+    lines_drawn: usize,
+    /// Tick counter that paces the non-TTY plain output.
+    plain_ticks: u32,
+}
+
+impl RenderState {
+    fn new() -> Self {
+        Self {
+            started: false,
+            finished: false,
+            mode: RunMode::Post,
+            target: None,
+            start: Instant::now(),
+            total_segments: 0,
+            total_bytes: 0,
+            done_segments: 0,
+            done_bytes: 0,
+            failures: 0,
+            interrupted: false,
+            status: String::new(),
+            conn_files: Vec::new(),
+            files: HashMap::new(),
+            lines_drawn: 0,
+            plain_ticks: 0,
+        }
+    }
+
+    fn apply(&mut self, ev: ProgressEvent) {
+        match ev {
+            ProgressEvent::Started {
+                mode,
+                files,
+                connections,
+                target,
+            } => {
+                self.started = true;
+                self.mode = mode;
+                self.target = target;
+                self.start = Instant::now();
+                self.conn_files = vec![None; connections];
+                for f in files {
+                    self.total_segments += f.segments;
+                    self.total_bytes += f.bytes;
+                    self.files.insert(f.name, (0, f.segments));
+                }
+            }
+            ProgressEvent::ConnectionBusy { conn, file } => {
+                if let Some(slot) = self.conn_files.get_mut(conn) {
+                    *slot = Some(file);
+                }
+            }
+            ProgressEvent::ConnectionIdle { conn } => {
+                if let Some(slot) = self.conn_files.get_mut(conn) {
+                    *slot = None;
+                }
+            }
+            ProgressEvent::SegmentDone { file, bytes, ok } => {
+                self.done_segments += 1;
+                self.done_bytes += bytes;
+                if !ok {
+                    self.failures += 1;
+                }
+                if let Some(entry) = self.files.get_mut(&file) {
+                    entry.0 += 1;
+                }
+            }
+            ProgressEvent::QueueExtended {
+                file,
+                segments,
+                bytes,
+            } => {
+                self.total_segments += segments;
+                self.total_bytes += bytes;
+                self.files.entry(file).or_insert((0, 0)).1 += segments;
+            }
+            ProgressEvent::Status { text } => self.status = text,
+            ProgressEvent::Failed { .. } => {}
+            ProgressEvent::Interrupted => self.interrupted = true,
+            ProgressEvent::Finished => self.finished = true,
+        }
+    }
+
+    /// Files that have every segment done, and files partially in flight.
+    fn file_tally(&self) -> (usize, usize) {
+        let mut done = 0;
+        let mut in_flight = 0;
+        for &(d, total) in self.files.values() {
+            if total > 0 && d >= total {
+                done += 1;
+            } else if d > 0 {
+                in_flight += 1;
+            }
+        }
+        (done, in_flight)
+    }
+
+    fn elapsed_secs(&self) -> f64 {
+        self.start.elapsed().as_secs_f64().max(0.001)
+    }
+
+    /// Bytes posted per second so far.
+    fn rate(&self) -> f64 {
+        self.done_bytes as f64 / self.elapsed_secs()
+    }
+
+    // ---- TTY panel rendering --------------------------------------------
+
+    fn draw_panel(&mut self, final_draw: bool) {
+        if !self.started {
+            return;
+        }
+        let lines = self.panel_lines(final_draw);
+
+        let mut out = String::new();
+        // Move the cursor back to the top of the previous panel and wipe
+        // everything below it, so a shorter panel leaves no stale lines.
+        if self.lines_drawn > 0 {
+            out.push_str(&format!("\x1b[{}F", self.lines_drawn));
+        }
+        out.push_str("\x1b[0J");
+        for line in &lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        self.lines_drawn = lines.len();
+
+        let mut err = std::io::stderr().lock();
+        let _ = err.write_all(out.as_bytes());
+        let _ = err.flush();
+    }
+
+    fn panel_lines(&self, final_draw: bool) -> Vec<String> {
+        let mut lines = Vec::new();
+
+        // --- header ------------------------------------------------------
+        let verb = match self.mode {
+            RunMode::Post => "posting",
+            RunMode::DryRun => "dry run",
+            RunMode::Par2Only => "par2",
+        };
+        let file_count = self.files.len();
+        let mut header = format!("pesto · {verb} {file_count} file(s)");
+        if let Some(t) = &self.target {
+            header.push_str(&format!(" → {t}"));
+        }
+        lines.push(header);
+
+        // --- overall box -------------------------------------------------
+        let frac = if self.total_bytes > 0 {
+            (self.done_bytes as f64 / self.total_bytes as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pct = (frac * 100.0).round() as u64;
+        let bar = render_bar(frac, 18);
+        let line1 = format!(
+            "[{bar}] {pct:>3}%  {}/{} seg",
+            self.done_segments, self.total_segments
+        );
+        let rate = self.rate();
+        let eta = if final_draw {
+            format!("elapsed {}", format_duration(self.elapsed_secs()))
+        } else if rate > 1.0 && self.total_bytes > self.done_bytes {
+            let remaining = (self.total_bytes - self.done_bytes) as f64 / rate;
+            format!("ETA {}", format_duration(remaining))
+        } else {
+            "ETA —".to_string()
+        };
+        let line2 = format!(
+            "{}/{} · {}/s · {eta}",
+            format_size(self.done_bytes),
+            format_size(self.total_bytes),
+            format_size(rate as u64),
+        );
+        lines.push(format!("┌─ overall {}┐", "─".repeat(BODY_W + 2 - 10)));
+        lines.push(box_line(&line1));
+        lines.push(box_line(&line2));
+        lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+
+        // --- per-connection activity ------------------------------------
+        let conns = self.conn_files.len();
+        if conns > 0 && conns <= GRID_LIMIT {
+            let mut idx = 0;
+            while idx < conns {
+                let left = conn_cell(idx, &self.conn_files[idx]);
+                let line = if idx + 1 < conns {
+                    format!("{left}{}", conn_cell(idx + 1, &self.conn_files[idx + 1]))
+                } else {
+                    left
+                };
+                lines.push(line);
+                idx += 2;
+            }
+        } else if conns > GRID_LIMIT {
+            let active = self.conn_files.iter().filter(|c| c.is_some()).count();
+            lines.push(format!("{conns} connections · {active} active"));
+        }
+
+        // --- file tally + failures --------------------------------------
+        let (done, in_flight) = self.file_tally();
+        lines.push(format!(
+            "files ✓{done} ⤵{in_flight} · failures {}",
+            self.failures
+        ));
+
+        // --- optional status / interrupt note --------------------------
+        if self.interrupted {
+            lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
+        } else if !self.status.is_empty() {
+            lines.push(format!("▸ {}", self.status));
+        }
+
+        lines
+    }
+
+    // ---- non-TTY plain rendering ----------------------------------------
+
+    fn draw_plain(&mut self, final_draw: bool) {
+        if !self.started {
+            return;
+        }
+        // Throttle to roughly one line every ~2s so logs stay readable.
+        self.plain_ticks += 1;
+        if !final_draw && !self.plain_ticks.is_multiple_of(10) {
+            return;
+        }
+        let rate = self.rate();
+        let mut err = std::io::stderr().lock();
+        if final_draw {
+            let _ = writeln!(
+                err,
+                "done: {}/{} segments · {} · {} failures · {}",
+                self.done_segments,
+                self.total_segments,
+                format_size(self.done_bytes),
+                self.failures,
+                format_duration(self.elapsed_secs()),
+            );
+        } else {
+            let _ = writeln!(
+                err,
+                "posting: {}/{} segments · {} · {}/s",
+                self.done_segments,
+                self.total_segments,
+                format_size(self.done_bytes),
+                format_size(rate as u64),
+            );
+        }
+        let _ = err.flush();
+    }
+}
+
+/// One cell of the connection grid, padded to a fixed column width.
+fn conn_cell(idx: usize, file: &Option<String>) -> String {
+    let label = match file {
+        Some(name) => truncate(name, 14),
+        None => "idle".to_string(),
+    };
+    let cell = format!("conn {:<2} ▸ {label}", idx + 1);
+    pad(&cell, 26)
+}
+
+/// Format a `│ … │` box content line, padding/truncating to the interior.
+fn box_line(body: &str) -> String {
+    format!("│ {} │", pad(body, BODY_W))
+}
+
+/// Draw a `████░░░░` proportional bar of the given character width.
+fn render_bar(frac: f64, width: usize) -> String {
+    let filled = (frac * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let mut s = String::with_capacity(width);
+    for _ in 0..filled {
+        s.push('█');
+    }
+    for _ in 0..width - filled {
+        s.push('░');
+    }
+    s
+}
+
+/// Pad `s` with spaces (or truncate it) to exactly `width` characters.
+fn pad(s: &str, width: usize) -> String {
+    let s = truncate(s, width);
+    let len = s.chars().count();
+    let mut out = String::with_capacity(width);
+    out.push_str(&s);
+    for _ in 0..width - len {
+        out.push(' ');
+    }
+    out
+}
+
+/// Truncate `s` to at most `width` characters, marking a cut with `…`.
+fn truncate(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Human-readable byte size with binary (IEC) units.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Format a duration in seconds as `m:ss` (or `h:mm:ss` past an hour).
+fn format_duration(secs: f64) -> String {
+    let total = secs.round() as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_size_uses_binary_units() {
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn format_duration_splits_minutes_and_hours() {
+        assert_eq!(format_duration(5.0), "0:05");
+        assert_eq!(format_duration(125.0), "2:05");
+        assert_eq!(format_duration(3661.0), "1:01:01");
+    }
+
+    #[test]
+    fn render_bar_is_proportional() {
+        assert_eq!(render_bar(0.0, 4), "░░░░");
+        assert_eq!(render_bar(1.0, 4), "████");
+        assert_eq!(render_bar(0.5, 4), "██░░");
+    }
+
+    #[test]
+    fn truncate_marks_the_cut() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("a-very-long-name", 8), "a-very-…");
+    }
+
+    #[test]
+    fn box_line_is_exact_width() {
+        let line = box_line("hello");
+        // `│ ` + BODY_W chars + ` │`
+        assert_eq!(line.chars().count(), BODY_W + 4);
+    }
+
+    #[test]
+    fn file_tally_counts_done_and_in_flight() {
+        let mut st = RenderState::new();
+        st.files.insert("a".into(), (10, 10));
+        st.files.insert("b".into(), (3, 10));
+        st.files.insert("c".into(), (0, 10));
+        assert_eq!(st.file_tally(), (1, 1));
+    }
+
+    #[test]
+    fn segment_done_updates_totals_and_failures() {
+        let mut st = RenderState::new();
+        st.apply(ProgressEvent::Started {
+            mode: RunMode::Post,
+            files: vec![FileEntry {
+                name: "a".into(),
+                segments: 2,
+                bytes: 100,
+            }],
+            connections: 1,
+            target: None,
+        });
+        st.apply(ProgressEvent::SegmentDone {
+            file: "a".into(),
+            bytes: 60,
+            ok: true,
+        });
+        st.apply(ProgressEvent::SegmentDone {
+            file: "a".into(),
+            bytes: 40,
+            ok: false,
+        });
+        assert_eq!(st.done_segments, 2);
+        assert_eq!(st.done_bytes, 100);
+        assert_eq!(st.failures, 1);
+        assert_eq!(st.file_tally(), (1, 0));
+    }
+}

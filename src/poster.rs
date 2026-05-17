@@ -8,9 +8,9 @@
 //! read passes over the files.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::fs::File;
@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::article::{default_subject, generate_message_id, obfuscated_name, Article};
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::Connection;
+use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::yenc;
 use crate::par2::encoder::{FileHasher, RecoveryEncoder, slice_checksum};
 use crate::par2::packet::{self, SliceChecksum};
@@ -74,39 +75,42 @@ struct PostTask {
     data: Vec<u8>,
 }
 
-struct Progress {
-    total_segments: AtomicU64,
-    done_segments: AtomicU64,
-    done_bytes: AtomicU64,
-    start: Instant,
-}
-
-impl Progress {
-    fn new(total_segments: u64) -> Self {
-        Self {
-            total_segments: AtomicU64::new(total_segments),
-            done_segments: AtomicU64::new(0),
-            done_bytes: AtomicU64::new(0),
-            start: Instant::now(),
-        }
-    }
-    fn segment_done(&self, raw_bytes: u64) {
-        self.done_segments.fetch_add(1, Ordering::Relaxed);
-        self.done_bytes.fetch_add(raw_bytes, Ordering::Relaxed);
-    }
-}
-
 struct Shared {
     config: Config,
     domain: String,
     results: Mutex<Vec<PostedSegment>>,
     failures: Mutex<Vec<String>>,
-    progress: Progress,
+    /// Progress channel; `None` keeps the poster silent (library default).
+    events: Option<ProgressSender>,
     cancelled: AtomicBool,
 }
 
+impl Shared {
+    /// Emit a progress event, ignoring a dropped or absent receiver.
+    fn emit(&self, event: ProgressEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(event);
+        }
+    }
+}
+
 /// Post every file in `files` to the groups configured in `config`.
+///
+/// This is the silent entry point; use [`post_files_with_progress`] to observe
+/// the run through a [`ProgressEvent`] channel.
 pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcome> {
+    post_files_with_progress(config, files, None).await
+}
+
+/// Post every file in `files`, emitting [`ProgressEvent`]s on `events`.
+///
+/// Passing `None` is equivalent to [`post_files`]. The poster never writes to
+/// the terminal itself: rendering is entirely up to the channel's consumer.
+pub async fn post_files_with_progress(
+    config: &Config,
+    files: &[PathBuf],
+    events: Option<ProgressSender>,
+) -> Result<PostOutcome> {
     configure_rayon();
 
     let mut metas = Vec::with_capacity(files.len());
@@ -153,37 +157,41 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
             .min(initial_segments.max(1) as usize)
     };
 
-    if config.par2_only {
-        eprintln!(
-            "PAR2 ONLY: generating parity for {} file(s) as {} segment(s) (no network, no .nzb)",
-            metas.len(),
-            initial_segments,
-        );
-    } else if config.dry_run {
-        eprintln!(
-            "DRY RUN: processing {} file(s) as {} segment(s) over {} thread(s) (no network)",
-            metas.len(),
-            initial_segments,
-            worker_count,
-        );
-    } else {
-        eprintln!(
-            "posting {} file(s) as {} segment(s) over {} connection(s) to {}:{}",
-            metas.len(),
-            initial_segments,
-            worker_count,
-            config.host,
-            config.port,
-        );
-    }
-
     let shared = Arc::new(Shared {
         config: config.clone(),
         domain: domain_from(&config.from),
         results: Mutex::new(Vec::new()),
         failures: Mutex::new(Vec::new()),
-        progress: Progress::new(initial_segments),
+        events,
         cancelled: AtomicBool::new(false),
+    });
+
+    // Announce the work plan: one `FileEntry` per source file, with the
+    // segment count posting will use. PAR2 files are added later, once the
+    // data pass has computed them, via `ProgressEvent::QueueExtended`.
+    let (mode, target) = if config.par2_only {
+        (RunMode::Par2Only, None)
+    } else if config.dry_run {
+        (RunMode::DryRun, None)
+    } else {
+        (
+            RunMode::Post,
+            Some(format!("{}:{}", config.host, config.port)),
+        )
+    };
+    let file_entries = metas
+        .iter()
+        .map(|m| FileEntry {
+            name: m.real_name.clone(),
+            segments: yenc::segments(m.size, config.article_size).len() as u64,
+            bytes: m.size,
+        })
+        .collect();
+    shared.emit(ProgressEvent::Started {
+        mode,
+        files: file_entries,
+        connections: worker_count,
+        target,
     });
 
     let cancel_handle = {
@@ -191,20 +199,17 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 shared.cancelled.store(true, Ordering::Relaxed);
-                eprintln!("\ninterrupt received — finishing in-flight segments...");
+                shared.emit(ProgressEvent::Interrupted);
             }
         })
     };
-
-    let done = Arc::new(AtomicBool::new(false));
-    let monitor_handle = tokio::spawn(monitor(shared.clone(), done.clone()));
 
     let mut handles = Vec::with_capacity(worker_count);
     let tx_opt = if worker_count > 0 {
         let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        for _ in 0..worker_count {
-            handles.push(tokio::spawn(worker(shared.clone(), rx.clone())));
+        for idx in 0..worker_count {
+            handles.push(tokio::spawn(worker(shared.clone(), rx.clone(), idx)));
         }
         Some(tx)
     } else {
@@ -214,7 +219,9 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
     // Producer runs in this thread
     if let Err(e) = producer(metas, tx_opt, shared.clone()).await {
         shared.cancelled.store(true, Ordering::Relaxed);
-        eprintln!("producer error: {e:#}");
+        shared.emit(ProgressEvent::Failed {
+            description: format!("producer error: {e:#}"),
+        });
     }
 
     for handle in handles {
@@ -228,9 +235,8 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         let _ = tokio::fs::remove_dir_all(par2_temp_dir()).await;
     }
 
-    done.store(true, Ordering::Relaxed);
-    let _ = monitor_handle.await;
     cancel_handle.abort();
+    shared.emit(ProgressEvent::Finished);
 
     let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
@@ -442,7 +448,13 @@ async fn producer(
                             return Ok(()); // channel closed
                         }
                     } else {
-                        shared.progress.segment_done(buf.len() as u64);
+                        // No posting pool (`--par2-only`): the read pass is
+                        // itself the progress, so report each article here.
+                        shared.emit(ProgressEvent::SegmentDone {
+                            file: meta.real_name.clone(),
+                            bytes: buf.len() as u64,
+                            ok: true,
+                        });
                     }
                 }
             }
@@ -457,7 +469,13 @@ async fn producer(
         }
 
         if let Some(enc) = encoder {
+            shared.emit(ProgressEvent::Status {
+                text: "computing PAR2 recovery data".to_string(),
+            });
             let recovery_slices = enc.finish();
+            shared.emit(ProgressEvent::Status {
+                text: String::new(),
+            });
 
             if pass_idx == 0 {
                 let mut file_ids = Vec::new();
@@ -538,7 +556,11 @@ async fn push_par2_file(
     let segments = yenc::segments(size, shared.config.article_size);
     let total = segments.len() as u32;
 
-    shared.progress.total_segments.fetch_add(total as u64, Ordering::Relaxed);
+    shared.emit(ProgressEvent::QueueExtended {
+        file: real_name.clone(),
+        segments: total as u64,
+        bytes: size,
+    });
 
     let (subject_name, yenc_name) = match shared.config.obfuscate {
         ObfuscateMode::None => (real_name.clone(), real_name.clone()),
@@ -574,7 +596,11 @@ async fn push_par2_file(
     Ok(())
 }
 
-async fn worker(shared: Arc<Shared>, rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PostTask>>>) {
+async fn worker(
+    shared: Arc<Shared>,
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PostTask>>>,
+    conn_id: usize,
+) {
     let mut conn: Option<Connection> = None;
 
     loop {
@@ -588,6 +614,11 @@ async fn worker(shared: Arc<Shared>, rx: Arc<tokio::sync::Mutex<tokio::sync::mps
                 None => break,
             }
         };
+
+        shared.emit(ProgressEvent::ConnectionBusy {
+            conn: conn_id,
+            file: task.meta.real_name.clone(),
+        });
 
         let encoded = yenc::encode_part(
             &task.meta.yenc_name,
@@ -659,8 +690,14 @@ async fn worker(shared: Arc<Shared>, rx: Arc<tokio::sync::Mutex<tokio::sync::mps
         } else {
             record_failure(&shared, &task.meta, &task, &last_err);
         }
-        shared.progress.segment_done(task.data.len() as u64);
+        shared.emit(ProgressEvent::SegmentDone {
+            file: task.meta.real_name.clone(),
+            bytes: task.data.len() as u64,
+            ok: posted,
+        });
     }
+
+    shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
 
     if let Some(mut connection) = conn {
         connection.quit().await;
@@ -677,47 +714,14 @@ async fn connect_and_auth(config: &Config) -> Result<Connection> {
 }
 
 fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str) {
-    shared.failures.lock().unwrap().push(format!(
+    let description = format!(
         "{} part {}/{}: {error}",
         meta.real_name, task.part, task.total
-    ));
-}
-
-async fn monitor(shared: Arc<Shared>, done: Arc<AtomicBool>) {
-    loop {
-        let total = shared.progress.total_segments.load(Ordering::Relaxed);
-        let segments = shared.progress.done_segments.load(Ordering::Relaxed);
-        let bytes = shared.progress.done_bytes.load(Ordering::Relaxed);
-        let elapsed = shared.progress.start.elapsed().as_secs_f64().max(0.001);
-        let rate = (bytes as f64 / elapsed) as u64;
-        eprint!(
-            "\rposting: {}/{} segments · {} · {}/s    ",
-            segments,
-            total,
-            format_size(bytes),
-            format_size(rate),
-        );
-        if done.load(Ordering::Relaxed) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!();
-}
-
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    );
+    shared.emit(ProgressEvent::Failed {
+        description: description.clone(),
+    });
+    shared.failures.lock().unwrap().push(description);
 }
 
 #[cfg(test)]
@@ -730,12 +734,5 @@ mod tests {
         assert_eq!(domain_from("a@b.net"), "b.net");
         assert_eq!(domain_from("no-at-sign"), "pesto");
         assert_eq!(domain_from(""), "pesto");
-    }
-
-    #[test]
-    fn format_size_uses_binary_units() {
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1024), "1.0 KiB");
-        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
     }
 }
