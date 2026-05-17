@@ -726,7 +726,7 @@ async fn run_single_upload(
                     .map(|d| d.join(format!("{entry_label}.nfo")))
             });
             if let Some(ref nfo_out) = base {
-                match pesto::nfo::generate(entry_paths, config.obfuscate == pesto::config::ObfuscateMode::Full) {
+                match pesto::nfo::generate(entry_paths) {
                     Some(content) => match pesto::nfo::write(nfo_out, &content) {
                         Ok(()) => {
                             println!("wrote nfo:  {}", nfo_out.display());
