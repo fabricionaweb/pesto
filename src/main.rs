@@ -154,9 +154,10 @@ struct Cli {
     compress: Option<String>,
 
     /// Bundle files into a password-protected archive before posting. Optional
-    /// PASSWORD: if omitted, a random 24-character password is generated and
-    /// printed. Implies `--compress` with the configured or default format.
-    #[arg(long = "password", value_name = "PASSWORD", num_args = 0..=1)]
+    /// PASSWORD: if omitted (`--password` alone), a random 24-character
+    /// password is generated and printed; use `--password=mypass` to set one
+    /// explicitly. Implies `--compress` with the configured or default format.
+    #[arg(long = "password", value_name = "PASSWORD", num_args = 0..=1, require_equals = true)]
     archive_password: Option<Option<String>>,
 
     /// Files or directories to post. A directory is walked recursively and
