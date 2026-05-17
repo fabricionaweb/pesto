@@ -133,6 +133,22 @@ impl Connection {
         }
     }
 
+    /// Check whether an article with `message_id` (without angle brackets) is
+    /// present on the server, using the `STAT` command (RFC 3977 §6.2.4).
+    ///
+    /// Returns `true` when the server responds 223 (article exists), `false`
+    /// on 430 (not found). Any other response code is returned as an error.
+    pub async fn stat(&mut self, message_id: &str) -> Result<bool> {
+        let resp = self
+            .command(&format!("STAT <{message_id}>"))
+            .await?;
+        match resp.code {
+            223 => Ok(true),
+            430 => Ok(false),
+            _ => bail!("unexpected STAT response: {} {}", resp.code, resp.text),
+        }
+    }
+
     /// Send `QUIT` and let the connection drop. Errors are ignored.
     pub async fn quit(&mut self) {
         let _ = self.command("QUIT").await;

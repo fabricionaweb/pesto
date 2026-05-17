@@ -166,33 +166,36 @@ original directory layout — not just a flat list of files.
 - [ ] Document integration points
 - [ ] Adapt the `upapasta` posting flow to use `pesto`
 
-## Phase 11 — Reliability & resilience
+## Phase 11 — Reliability & resilience ✅
 
-### 11a — Multiple servers with failover
+### 11a — Multiple servers with failover ✅
 
-- [ ] Support N servers in config (`[[server]]` array)
-- [ ] Connections that fail reopen on the next available server
-- [ ] Per-server connection count; health tracking
+- [x] Support N servers in config (`[[servers]]` array of tables)
+- [x] Connections that fail reopen on the next available server (round-robin
+      rotation on each retry attempt)
+- [x] Per-server connection count; workers assigned to servers proportionally
 
-### 11b — Upload resume
+### 11b — Upload resume ✅
 
-- [ ] Persist post state (posted `Message-ID`s) to a `.pesto-state` sidecar file
-- [ ] On the next run, skip already-posted articles and continue from where
-      the session left off
-- [ ] `--no-resume` flag to force a clean start
+- [x] Persist post state (posted `Message-ID`s) to a `.pesto-state` sidecar
+      file (JSON, keyed by `file_name + part`)
+- [x] On the next run, skip already-posted articles and reuse their
+      `Message-ID` so the `.nzb` is still complete and correct
+- [x] `--no-resume` flag to force a clean start
 
-### 11c — Post-verification via `STAT`
+### 11c — Post-verification via `STAT` ✅
 
-- [ ] After posting each article, confirm with `STAT <message-id>` that the
-      server registered it
-- [ ] Automatically repost articles that fail the check
-- [ ] `--no-verify` flag to skip verification for maximum throughput
+- [x] After posting each article, confirm with `STAT <message-id>` that the
+      server registered it (`verify = true` / `--verify`)
+- [x] Automatically repost articles that fail the check; rotate servers on
+      consecutive STAT failures
+- [x] Off by default — use `--verify` or `posting.verify = true` to enable
 
-### 11d — Rate limiting
+### 11d — Rate limiting ✅
 
-- [ ] `upload_rate` config option (e.g. `"50 MiB/s"`) and `--rate` flag
-- [ ] Token-bucket throttle applied per connection so total throughput stays
-      at or below the configured ceiling
+- [x] `upload_rate` config option (e.g. `"50 MiB/s"`) and `--rate` flag
+- [x] Per-worker token-bucket throttle; global rate divided across connections
+      so total throughput stays at or below the configured ceiling
 
 ## Phase 12 — Performance
 

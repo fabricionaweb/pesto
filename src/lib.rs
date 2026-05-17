@@ -11,5 +11,6 @@ pub mod nzb;
 pub mod par2;
 pub mod poster;
 pub mod progress;
+pub mod resume;
 pub mod walk;
 pub mod yenc;

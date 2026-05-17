@@ -100,6 +100,10 @@ async fn posts_every_segment_to_a_mock_server() {
         dry_run: false,
         par2: 0,
         par2_only: false,
+        extra_servers: vec![],
+        verify: false,
+        resume: false,
+        upload_rate: 0,
     };
 
     let inputs = vec![pesto::walk::InputFile {

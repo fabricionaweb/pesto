@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pesto::config::{self, Config, FileConfig, ObfuscateMode, Overrides};
+use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -132,6 +132,20 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
+    /// Disable upload resume: ignore any existing state file and start fresh.
+    #[arg(long)]
+    no_resume: bool,
+
+    /// After posting each article, confirm it is present on the server with
+    /// STAT and repost if not found [config: posting.verify, default false].
+    #[arg(long)]
+    verify: bool,
+
+    /// Maximum upload rate across all connections (e.g. "50 MiB/s", "10 MB/s").
+    /// 0 or omitted means unlimited [config: posting.upload_rate].
+    #[arg(long, value_name = "RATE")]
+    rate: Option<String>,
+
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
     #[arg(value_name = "PATH")]
@@ -163,6 +177,14 @@ impl Cli {
             dry_run: if self.dry_run { Some(true) } else { None },
             par2: self.par2,
             par2_only: if self.par2_only { Some(true) } else { None },
+            resume: if self.no_resume { Some(false) } else { None },
+            verify: if self.verify { Some(true) } else { None },
+            upload_rate: self
+                .rate
+                .as_deref()
+                .map(parse_upload_rate)
+                .transpose()
+                .unwrap_or(None),
         }
     }
 }
@@ -205,11 +227,40 @@ async fn main() -> Result<()> {
     let inputs = pesto::walk::expand_inputs(&cli.files)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
 
+    // Derive the resume state path from the NZB output path when known.
+    // We compute the NZB path early (before posting) so we can derive the
+    // resume sidecar name, even though we write the NZB after posting.
+    let nzb_out_path: Option<PathBuf> = cli
+        .out
+        .clone()
+        .or_else(|| nzb_default.as_deref().map(PathBuf::from))
+        .or_else(|| {
+            // For a directory upload the first file's name starts with the
+            // root folder, e.g. "season01/ep01.mkv" → stem "season01".
+            inputs.first().and_then(|f| {
+                let top = f.name.split('/').next()?;
+                if top != f.name {
+                    // It really is a directory upload.
+                    Some(PathBuf::from(format!("{top}.nzb")))
+                } else {
+                    None
+                }
+            })
+        });
+    let resume_path: Option<PathBuf> = nzb_out_path
+        .as_ref()
+        .map(|p| p.with_extension("pesto-state"));
+
     // Install the terminal progress panel. The poster only emits events; the
     // renderer task owns all terminal drawing and is awaited once posting ends.
     let (progress_tx, renderer) = pesto::progress::spawn_terminal_renderer();
-    let outcome =
-        pesto::poster::post_files_with_progress(&config, &inputs, Some(progress_tx)).await?;
+    let outcome = pesto::poster::post_files_with_progress(
+        &config,
+        &inputs,
+        Some(progress_tx),
+        resume_path.as_deref(),
+    )
+    .await?;
     let _ = renderer.await;
 
     if config.par2_only {
