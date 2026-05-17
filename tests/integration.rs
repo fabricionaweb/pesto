@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use pesto::config::Config;
+use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::post_files;
 
 /// Handle one mock NNTP connection: greet, accept auth, ack each `POST`.
@@ -93,7 +93,7 @@ async fn posts_every_segment_to_a_mock_server() {
         from: "tester <t@pesto.test>".to_string(),
         groups: vec!["alt.binaries.test".to_string()],
         article_size: 100,
-        obfuscate: false,
+        obfuscate: ObfuscateMode::None,
     };
 
     let outcome = post_files(&config, std::slice::from_ref(&path))

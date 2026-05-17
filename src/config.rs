@@ -6,6 +6,7 @@
 //! program.
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -15,6 +16,22 @@ pub const DEFAULT_PORT: u16 = 563;
 pub const DEFAULT_CONNECTIONS: usize = 4;
 /// Default target size of each article body, in bytes.
 pub const DEFAULT_ARTICLE_SIZE: usize = 768_000;
+
+/// How much of a post to obfuscate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ObfuscateMode {
+    /// No obfuscation: the real file name appears in the subject and the
+    /// yEnc header.
+    #[default]
+    None,
+    /// Random subject; the yEnc `name=` field keeps the real file name, so a
+    /// standard client still names the download correctly.
+    Subject,
+    /// Random subject *and* random yEnc `name=` field. Nothing on the wire
+    /// reveals the real name — recover it from the `.nzb` or from PAR2 files.
+    Full,
+}
 
 /// Configuration as parsed from the TOML file. Every field is optional so the
 /// file may be partial and the remainder supplied via CLI flags.
@@ -51,7 +68,7 @@ pub struct PostingSection {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
-    pub obfuscate: Option<bool>,
+    pub obfuscate: Option<ObfuscateMode>,
 }
 
 impl FileConfig {
@@ -76,7 +93,7 @@ pub struct Overrides {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
-    pub obfuscate: Option<bool>,
+    pub obfuscate: Option<ObfuscateMode>,
 }
 
 /// Fully resolved, validated configuration.
@@ -91,8 +108,8 @@ pub struct Config {
     pub from: String,
     pub groups: Vec<String>,
     pub article_size: usize,
-    /// When true, post under random subjects and yEnc file names.
-    pub obfuscate: bool,
+    /// How much of each post to obfuscate.
+    pub obfuscate: ObfuscateMode,
 }
 
 impl Config {
@@ -133,7 +150,7 @@ impl Config {
                 .article_size
                 .or(file.posting.article_size)
                 .unwrap_or(DEFAULT_ARTICLE_SIZE),
-            obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or(false),
+            obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
         })
     }
 }
@@ -177,5 +194,12 @@ mod tests {
     fn missing_required_field_errors() {
         let cfg = Config::resolve(FileConfig::default(), Overrides::default());
         assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn obfuscate_mode_parses_from_toml_and_defaults_to_none() {
+        let file: FileConfig = toml::from_str("[posting]\nobfuscate = \"full\"\n").unwrap();
+        assert_eq!(file.posting.obfuscate, Some(ObfuscateMode::Full));
+        assert_eq!(ObfuscateMode::default(), ObfuscateMode::None);
     }
 }

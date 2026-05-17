@@ -62,7 +62,7 @@ pesto \
 | `--from <FROM>` | `From` header for posted articles |
 | `--groups <G,...>` | Newsgroups to post to (comma-separated) |
 | `-o`, `--out <PATH>` | Path of the `.nzb` file to write |
-| `--obfuscate` | Post under random subjects and yEnc file names |
+| `--obfuscate[=MODE]` | Obfuscation mode: `none`, `subject` or `full` (bare flag = `full`) |
 
 ### Exit codes
 
@@ -77,11 +77,19 @@ still writes an `.nzb` for whatever was posted.
 
 ### Obfuscation
 
-With `--obfuscate`, each file is posted under a random subject and a random
-yEnc file name, so nothing on the wire reveals the real file name. The real
-name is preserved only in the generated `.nzb`, in the `name` attribute of the
-`<file>` element — keep the `.nzb` to restore it. Without the `.nzb` an
-obfuscated post cannot be reassembled or named.
+`--obfuscate` has three modes:
+
+- **`none`** (default) — the real file name appears in the subject and the
+  yEnc header.
+- **`subject`** — random subject, but the yEnc `name=` field keeps the real
+  file name, so a standard download client still names the file correctly.
+  This hides the post from public indexers.
+- **`full`** — random subject *and* random yEnc `name=`. Nothing on the wire
+  reveals the real name. Recover it from the generated `.nzb` (the `name`
+  attribute of the `<file>` element) or, when posted alongside PAR2 files,
+  let PAR2 rename the files by content hash.
+
+A bare `--obfuscate` (no value) means `full`.
 
 ## Development
 

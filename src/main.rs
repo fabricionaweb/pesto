@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pesto::config::{Config, FileConfig, Overrides};
+use pesto::config::{Config, FileConfig, ObfuscateMode, Overrides};
 
 /// Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.
 #[derive(Parser, Debug)]
@@ -53,9 +53,10 @@ struct Cli {
     #[arg(short, long, value_name = "PATH")]
     out: Option<PathBuf>,
 
-    /// Post under random subjects and yEnc file names.
-    #[arg(long)]
-    obfuscate: bool,
+    /// Obfuscation mode: `none`, `subject` or `full`. A bare `--obfuscate`
+    /// means `full`.
+    #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1, default_missing_value = "full")]
+    obfuscate: Option<ObfuscateMode>,
 
     /// Files to post.
     #[arg(required = true, value_name = "FILE")]
@@ -80,7 +81,7 @@ impl Cli {
                 Some(self.groups.clone())
             },
             article_size: None,
-            obfuscate: if self.obfuscate { Some(true) } else { None },
+            obfuscate: self.obfuscate,
         }
     }
 }

@@ -15,8 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::article::{default_subject, generate_message_id, Article};
-use crate::config::Config;
+use crate::article::{default_subject, generate_message_id, obfuscated_name, Article};
+use crate::config::{Config, ObfuscateMode};
 use crate::nntp::Connection;
 use crate::yenc;
 
@@ -30,9 +30,8 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 pub struct PostedSegment {
     /// Real name of the source file on disk.
     pub file_name: String,
-    /// Name the segment was posted under (random when obfuscation is on,
-    /// otherwise equal to `file_name`).
-    pub posting_name: String,
+    /// Name used in the article subject (random under obfuscation).
+    pub subject_name: String,
     /// Total size of the source file, in bytes.
     pub file_size: u64,
     /// 1-based part number.
@@ -61,8 +60,10 @@ struct FileMeta {
     path: PathBuf,
     /// The file's real name on disk.
     real_name: String,
-    /// The name used on the wire — random when obfuscation is on.
-    posting_name: String,
+    /// Name used to build the article subject.
+    subject_name: String,
+    /// Name written into the yEnc `=ybegin name=` field.
+    yenc_name: String,
     size: u64,
 }
 
@@ -129,15 +130,19 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("invalid file name: `{}`", path.display()))?
             .to_string();
-        let posting_name = if config.obfuscate {
-            crate::article::obfuscated_name()
-        } else {
-            real_name.clone()
+        let (subject_name, yenc_name) = match config.obfuscate {
+            ObfuscateMode::None => (real_name.clone(), real_name.clone()),
+            ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
+            ObfuscateMode::Full => {
+                let obfuscated = obfuscated_name();
+                (obfuscated.clone(), obfuscated)
+            }
         };
         metas.push(FileMeta {
             path: path.clone(),
             real_name,
-            posting_name,
+            subject_name,
+            yenc_name,
             size: md.len(),
         });
     }
@@ -263,7 +268,7 @@ async fn worker(shared: Arc<Shared>) {
         };
 
         let encoded = yenc::encode_part(
-            &meta.posting_name,
+            &meta.yenc_name,
             meta.size,
             yenc::PartSpec {
                 number: item.part,
@@ -279,7 +284,7 @@ async fn worker(shared: Arc<Shared>) {
             message_id: message_id.clone(),
             from: shared.config.from.clone(),
             newsgroups: shared.config.groups.clone(),
-            subject: default_subject(&meta.posting_name, item.part, item.total),
+            subject: default_subject(&meta.subject_name, item.part, item.total),
         };
         let payload = article.serialize(&encoded.body);
 
@@ -318,7 +323,7 @@ async fn worker(shared: Arc<Shared>) {
         if posted {
             shared.results.lock().unwrap().push(PostedSegment {
                 file_name: meta.real_name.clone(),
-                posting_name: meta.posting_name.clone(),
+                subject_name: meta.subject_name.clone(),
                 file_size: meta.size,
                 part: item.part,
                 total: item.total,
@@ -423,7 +428,8 @@ mod tests {
         FileMeta {
             path: PathBuf::from(name),
             real_name: name.to_string(),
-            posting_name: name.to_string(),
+            subject_name: name.to_string(),
+            yenc_name: name.to_string(),
             size,
         }
     }
