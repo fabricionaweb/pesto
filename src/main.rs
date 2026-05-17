@@ -518,13 +518,12 @@ async fn run_single_upload(
                             .into_owned()
                     })
                 })?;
-            let filename = format!("{stem}.nzb");
-            let path = if let Some(dir) = &config.nzb_dir {
-                expand_tilde(dir).join(&filename)
+            let base = if let Some(dir) = &config.nzb_dir {
+                expand_tilde(dir).join(&stem)
             } else {
-                PathBuf::from(filename)
+                PathBuf::from(&stem)
             };
-            Some(path)
+            Some(next_free_versioned_path(&base, "nzb"))
         });
     let resume_path: Option<PathBuf> = nzb_out_path
         .as_ref()
@@ -1316,6 +1315,31 @@ fn is_executable(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("exe" | "cmd" | "bat" | "ps1" | "py")
     )
+}
+
+/// Return `base.ext` if it does not exist, otherwise `base.v2.ext`,
+/// `base.v3.ext`, … until a free slot is found.
+fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
+    let candidate = base.with_extension(ext);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let mut v = 2u32;
+    loop {
+        let stem = base
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let versioned = base
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!("{stem}.v{v}"))
+            .with_extension(ext);
+        if !versioned.exists() {
+            return versioned;
+        }
+        v += 1;
+    }
 }
 
 /// Expand a leading `~` to the user's home directory.
