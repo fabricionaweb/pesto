@@ -9,6 +9,12 @@
 # Every field is optional and can be overridden by the matching CLI flag.
 # Commented-out fields show their built-in default.
 
+# ── Single-server configuration ─────────────────────────────────────────────
+#
+# Use [server] + [auth] when you have one provider. For multiple servers with
+# automatic failover, replace these sections with [[servers]] entries (see
+# the "Multi-server failover" section below).
+
 [server]
 host = "news.example.com"
 # port = 563          # NNTP port; 563 is TLS, 119 is plaintext. Default: 563.
@@ -22,6 +28,31 @@ host = "news.example.com"
 # Never commit a real password to version control.
 username = "your_username"
 password = "your_password"
+
+# ── Multi-server failover ────────────────────────────────────────────────────
+#
+# Define two or more [[servers]] entries to enable automatic failover.
+# The first entry is the primary; the rest are tried in order when a
+# connection fails. When [[servers]] is present, [server] and [auth] are
+# ignored. Each entry may have its own credentials and connection count.
+#
+# [[servers]]
+# host = "news.primary.com"
+# port = 563
+# ssl = true
+# connections = 10
+# username = "user1"
+# password = "pass1"
+# retry_delay = 1
+#
+# [[servers]]
+# host = "news.fallback.com"
+# port = 563
+# ssl = true
+# connections = 4
+# username = "user2"
+# password = "pass2"
+# retry_delay = 2
 
 [posting]
 # from — the `From` header on every article.
@@ -51,6 +82,15 @@ groups = ["alt.binaries.test"]
 # par2 — percentage of PAR2 recovery data to generate. 0 disables it.
 # Default: 10.
 # par2 = 10
+
+# verify — confirm each posted article is present on the server via STAT
+# and repost if not found. Adds one round-trip per article. Default: false.
+# verify = false
+
+# upload_rate — maximum total upload speed across all connections.
+# Accepts human-readable values: "50 MiB/s", "10 MB/s", "1024 KiB/s".
+# 0 or omitted means unlimited. Also settable with --rate.
+# upload_rate = "0"
 
 [output]
 # nzb — default path for the generated .nzb file. Overridden by --out.

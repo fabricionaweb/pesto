@@ -26,6 +26,10 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         dry_run: true,
         par2: 0,
         par2_only: false,
+        extra_servers: vec![],
+        verify: false,
+        resume: false,
+        upload_rate: 0,
     }
 }
 

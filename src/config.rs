@@ -6,7 +6,7 @@
 //! program.
 
 use crate::article::random_from;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,55 @@ pub const DEFAULT_RETRIES: u32 = 3;
 pub const DEFAULT_RETRY_DELAY: u64 = 1;
 /// Default percentage of PAR2 recovery data to generate.
 pub const DEFAULT_PAR2: u8 = 10;
+
+/// A fully resolved per-server entry used for failover.
+///
+/// The primary server's fields live directly on [`Config`] for backward
+/// compatibility. Additional failover servers are stored in
+/// [`Config::extra_servers`].
+#[derive(Debug, Clone)]
+pub struct ServerEntry {
+    pub host: String,
+    pub port: u16,
+    pub ssl: bool,
+    pub connections: usize,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub retry_delay: u64,
+}
+
+/// Parse a human-readable upload rate string into bytes per second.
+///
+/// Accepted formats: `"50 MiB/s"`, `"10 MB/s"`, `"1024 KiB/s"`,
+/// `"100 KB/s"`, `"500"` (bare number = bytes/sec).
+/// Unit matching is case-insensitive.
+pub fn parse_upload_rate(s: &str) -> Result<u64> {
+    let s = s.trim();
+    // strip optional trailing "/s" or "ps"
+    let s = s
+        .strip_suffix("/s")
+        .or_else(|| s.strip_suffix("ps"))
+        .unwrap_or(s)
+        .trim();
+
+    // split at first non-digit, non-dot character
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num_str, unit) = s.split_at(split);
+    let value: f64 = num_str
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid upload rate `{}`", s))?;
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        other => bail!("unknown rate unit `{other}` in `{s}`"),
+    };
+    Ok((value * multiplier) as u64)
+}
 
 /// Path of the config file `pesto` loads when `--config` is not given.
 ///
@@ -59,6 +108,21 @@ pub enum ObfuscateMode {
     Full,
 }
 
+/// A per-server entry as parsed from `[[servers]]` in the TOML file.
+///
+/// Credentials live here (no separate `[auth]` section per failover server).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileServerEntry {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub ssl: Option<bool>,
+    pub connections: Option<usize>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub retry_delay: Option<u64>,
+}
+
 /// Configuration as parsed from the TOML file. Every field is optional so the
 /// file may be partial and the remainder supplied via CLI flags.
 #[derive(Debug, Default, Deserialize)]
@@ -68,6 +132,11 @@ pub struct FileConfig {
     pub server: ServerSection,
     #[serde(default)]
     pub auth: AuthSection,
+    /// Optional array of failover servers (`[[servers]]`). When non-empty,
+    /// the first entry becomes the primary server; `[server]` / `[auth]` are
+    /// ignored.
+    #[serde(default, rename = "servers")]
+    pub extra_servers: Vec<FileServerEntry>,
     #[serde(default)]
     pub posting: PostingSection,
     #[serde(default)]
@@ -104,6 +173,10 @@ pub struct PostingSection {
     pub retries: Option<u32>,
     pub obfuscate: Option<ObfuscateMode>,
     pub par2: Option<u8>,
+    /// Confirm each posted article via STAT after posting.
+    pub verify: Option<bool>,
+    /// Maximum upload rate as a human-readable string, e.g. `"50 MiB/s"`.
+    pub upload_rate: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -142,17 +215,29 @@ pub struct Overrides {
     pub dry_run: Option<bool>,
     pub par2: Option<u8>,
     pub par2_only: Option<bool>,
+    /// `false` disables resume (equivalent to `--no-resume`).
+    pub resume: Option<bool>,
+    /// `false` disables post-verification via `STAT` (equivalent to `--no-verify`).
+    pub verify: Option<bool>,
+    /// Maximum upload rate in bytes/sec; `0` means unlimited.
+    pub upload_rate: Option<u64>,
 }
 
 /// Fully resolved, validated configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    // Primary server (index 0 of the server pool).
     pub host: String,
     pub port: u16,
     pub ssl: bool,
     pub connections: usize,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Seconds to wait between failed post attempts (primary server).
+    pub retry_delay: u64,
+    /// Failover servers. Workers rotate into these when the primary fails.
+    /// The primary's fields above are always tried first.
+    pub extra_servers: Vec<ServerEntry>,
     pub from: String,
     pub groups: Vec<String>,
     pub article_size: usize,
@@ -160,8 +245,6 @@ pub struct Config {
     pub line_length: usize,
     /// Post attempts per segment before it is recorded as failed.
     pub retries: u32,
-    /// Seconds to wait between failed post attempts.
-    pub retry_delay: u64,
     /// How much of each post to obfuscate.
     pub obfuscate: ObfuscateMode,
     /// If true, skip the network and just simulate posting.
@@ -170,6 +253,38 @@ pub struct Config {
     pub par2: u8,
     /// Only generate PAR2 files without uploading them.
     pub par2_only: bool,
+    /// Confirm each posted article with `STAT` and repost on failure.
+    pub verify: bool,
+    /// Load and save a resume state file to skip already-posted segments.
+    pub resume: bool,
+    /// Maximum upload rate in bytes/sec across all connections; 0 = unlimited.
+    pub upload_rate: u64,
+}
+
+impl Config {
+    /// All servers in priority order: primary first, then [`extra_servers`].
+    pub fn all_servers(&self) -> impl Iterator<Item = ServerEntry> + '_ {
+        std::iter::once(ServerEntry {
+            host: self.host.clone(),
+            port: self.port,
+            ssl: self.ssl,
+            connections: self.connections,
+            username: self.username.clone(),
+            password: self.password.clone(),
+            retry_delay: self.retry_delay,
+        })
+        .chain(self.extra_servers.iter().cloned())
+    }
+
+    /// Total number of parallel connections across all servers.
+    pub fn total_connections(&self) -> usize {
+        self.connections
+            + self
+                .extra_servers
+                .iter()
+                .map(|s| s.connections)
+                .sum::<usize>()
+    }
 }
 
 impl Config {
@@ -181,15 +296,68 @@ impl Config {
         let dry_run = cli.dry_run.unwrap_or(false);
         let par2_only = cli.par2_only.unwrap_or(false);
 
-        let host = if dry_run || par2_only {
-            cli.host
-                .or(file.server.host)
-                .unwrap_or_else(|| "localhost".into())
-        } else {
-            cli.host
-                .or(file.server.host)
-                .context("no `host` set: provide [server].host or --host")?
-        };
+        // If [[servers]] is present, it takes precedence over [server]/[auth].
+        let (host, port, ssl, connections, username, password, retry_delay, extra_servers) =
+            if !file.extra_servers.is_empty() {
+                let mut iter = file.extra_servers.into_iter();
+                let primary = iter.next().unwrap();
+                let host = cli
+                    .host
+                    .or(primary.host)
+                    .context("first [[servers]] entry has no `host`")?;
+                let port = cli.port.or(primary.port).unwrap_or(DEFAULT_PORT);
+                let ssl = cli.ssl.or(primary.ssl).unwrap_or(true);
+                let connections = cli
+                    .connections
+                    .or(primary.connections)
+                    .unwrap_or(DEFAULT_CONNECTIONS);
+                let username = cli.username.or(primary.username);
+                let password = cli.password.or(primary.password);
+                let retry_delay = cli
+                    .retry_delay
+                    .or(primary.retry_delay)
+                    .unwrap_or(DEFAULT_RETRY_DELAY);
+                let extras: Vec<ServerEntry> = iter
+                    .map(|e| -> Result<ServerEntry> {
+                        Ok(ServerEntry {
+                            host: e.host.context("[[servers]] entry missing `host`")?,
+                            port: e.port.unwrap_or(DEFAULT_PORT),
+                            ssl: e.ssl.unwrap_or(true),
+                            connections: e.connections.unwrap_or(DEFAULT_CONNECTIONS),
+                            username: e.username,
+                            password: e.password,
+                            retry_delay: e.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                (
+                    host, port, ssl, connections, username, password, retry_delay, extras,
+                )
+            } else {
+                let host = if dry_run || par2_only {
+                    cli.host
+                        .or(file.server.host)
+                        .unwrap_or_else(|| "localhost".into())
+                } else {
+                    cli.host
+                        .or(file.server.host)
+                        .context("no `host` set: provide [server].host or --host")?
+                };
+                (
+                    host,
+                    cli.port.or(file.server.port).unwrap_or(DEFAULT_PORT),
+                    cli.ssl.or(file.server.ssl).unwrap_or(true),
+                    cli.connections
+                        .or(file.server.connections)
+                        .unwrap_or(DEFAULT_CONNECTIONS),
+                    cli.username.or(file.auth.username),
+                    cli.password.or(file.auth.password),
+                    cli.retry_delay
+                        .or(file.server.retry_delay)
+                        .unwrap_or(DEFAULT_RETRY_DELAY),
+                    vec![],
+                )
+            };
 
         // A `from` is never required: when the user pins neither a config
         // value nor `--from`, post under a freshly generated random identity.
@@ -208,14 +376,13 @@ impl Config {
 
         Ok(Config {
             host,
-            port: cli.port.or(file.server.port).unwrap_or(DEFAULT_PORT),
-            ssl: cli.ssl.or(file.server.ssl).unwrap_or(true),
-            connections: cli
-                .connections
-                .or(file.server.connections)
-                .unwrap_or(DEFAULT_CONNECTIONS),
-            username: cli.username.or(file.auth.username),
-            password: cli.password.or(file.auth.password),
+            port,
+            ssl,
+            connections,
+            username,
+            password,
+            retry_delay,
+            extra_servers,
             from,
             groups,
             article_size: cli
@@ -231,14 +398,25 @@ impl Config {
                 .or(file.posting.retries)
                 .unwrap_or(DEFAULT_RETRIES)
                 .max(1),
-            retry_delay: cli
-                .retry_delay
-                .or(file.server.retry_delay)
-                .unwrap_or(DEFAULT_RETRY_DELAY),
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
             par2_only,
+            verify: cli
+                .verify
+                .or(file.posting.verify)
+                .unwrap_or(false),
+            resume: cli.resume.unwrap_or(true),
+            upload_rate: {
+                // CLI `--rate` wins; fall back to config file string.
+                if let Some(rate) = cli.upload_rate {
+                    rate
+                } else if let Some(s) = file.posting.upload_rate {
+                    parse_upload_rate(&s)?
+                } else {
+                    0
+                }
+            },
         })
     }
 }
