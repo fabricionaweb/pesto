@@ -166,9 +166,151 @@ original directory layout — not just a flat list of files.
 - [ ] Document integration points
 - [ ] Adapt the `upapasta` posting flow to use `pesto`
 
-## Post-MVP (future ideas)
+## Phase 11 — Reliability & resilience
 
-- Compression / RAR creation before posting
-- Resume of interrupted posts
-- Rate limiting
-- Multiple servers / failover
+### 11a — Multiple servers with failover
+
+- [ ] Support N servers in config (`[[server]]` array)
+- [ ] Connections that fail reopen on the next available server
+- [ ] Per-server connection count; health tracking
+
+### 11b — Upload resume
+
+- [ ] Persist post state (posted `Message-ID`s) to a `.pesto-state` sidecar file
+- [ ] On the next run, skip already-posted articles and continue from where
+      the session left off
+- [ ] `--no-resume` flag to force a clean start
+
+### 11c — Post-verification via `STAT`
+
+- [ ] After posting each article, confirm with `STAT <message-id>` that the
+      server registered it
+- [ ] Automatically repost articles that fail the check
+- [ ] `--no-verify` flag to skip verification for maximum throughput
+
+### 11d — Rate limiting
+
+- [ ] `upload_rate` config option (e.g. `"50 MiB/s"`) and `--rate` flag
+- [ ] Token-bucket throttle applied per connection so total throughput stays
+      at or below the configured ceiling
+
+## Phase 12 — Performance
+
+### 12a — Double-buffered I/O
+
+- [ ] Overlap disk reads with encoding/posting using a double-buffer scheme:
+      while one buffer is being encoded and sent, the next is already being
+      read from disk
+- [ ] Measure impact on spinning-disk and NVMe scenarios
+
+### 12b — Buffer pool
+
+- [ ] Reuse `Vec<u8>` article buffers via a pool instead of allocating per
+      article
+- [ ] Benchmark allocator pressure before and after on high-connection counts
+
+## Phase 13 — Compression before posting
+
+Pre-process files into a compressed archive before encoding and uploading.
+Compatibility with standard Usenet clients (NZBGet / SABnzbd / Unrar) requires
+the RAR format for most workflows.
+
+- [ ] `--compress` flag and `compress` config option (`rar`, `zip`, `none`)
+- [ ] Invoke `rar` / `zip` as a subprocess, or use a pure-Rust implementation
+      (`zip` crate; RAR requires a native binary due to licensing)
+- [ ] Pipe the archive stream directly into the posting pipeline to avoid
+      writing an intermediate file to disk
+- [ ] PAR2 is computed over the compressed archive, not the original files
+- [ ] Remove temporary archive after posting (or keep with `--keep-archive`)
+
+## Phase 14 — Posting features
+
+### 14a — Cross-posting optimisation
+
+- [ ] When multiple groups are configured, send each article in a single
+      `POST` with all groups in the `Newsgroups:` header instead of separate
+      articles per group
+- [ ] Update `.nzb` generation to reflect cross-posted `Message-ID`s
+
+### 14b — Configurable `Date:` header
+
+- [ ] `date` config option: `now` (default), `random` (within the last N
+      days), or a fixed RFC 2822 timestamp
+- [ ] `--date` flag overrides the config
+
+### 14c — Anonymous server support
+
+- [ ] Make `auth` section fully optional; skip `AUTHINFO` when credentials
+      are absent and the server advertises `NOAUTH`
+
+### 14d — `X-No-Archive` header
+
+- [ ] `no_archive` boolean config option and `--no-archive` flag
+- [ ] When enabled, add `X-No-Archive: yes` to every posted article
+
+### 14e — Configurable `Message-ID` domain
+
+- [ ] `message_id_domain` config option (default: current behaviour)
+- [ ] `--message-id-domain` flag
+- [ ] Validate that the value is a syntactically valid domain label
+
+## Phase 15 — NZB & metadata
+
+### 15a — Extended NZB metadata
+
+- [ ] `--nzb-name`, `--nzb-password`, `--nzb-category` flags and
+      corresponding config keys
+- [ ] Emit `<meta type="name">`, `<meta type="password">` and
+      `<meta type="category">` elements in the `.nzb` when set
+- [ ] Compatible with NZBGet and SABnzbd metadata conventions
+
+### 15b — Automatic NZB upload to indexers
+
+- [ ] `[output.indexer]` config section: `url`, `api_key`, `category`
+- [ ] After a successful post, upload the generated `.nzb` via the indexer
+      Newznab/NZBgeek API
+- [ ] `--no-upload` flag to suppress the upload for a single run
+
+### 15c — `.nfo` generation
+
+- [ ] Generate a `.nfo` article as the first article of the set
+- [ ] Contents: upload name, total size, file list, SHA-256 hashes of
+      original files, date
+- [ ] `--no-nfo` flag to skip generation
+
+## Phase 16 — Observability & UX
+
+### 16a — JSON output mode
+
+- [ ] `--output-format json` flag
+- [ ] Progress events emitted as newline-delimited JSON to stdout; final
+      result summary as a single JSON object
+- [ ] Designed for scripting and `upapasta` integration
+
+### 16b — Upload history log
+
+- [ ] Store a record of each completed upload in
+      `~/.local/share/pesto/history.db` (SQLite via `rusqlite`)
+- [ ] Schema: upload ID, timestamp, files, total bytes, NZB path, groups,
+      subject base
+- [ ] `pesto history` subcommand: list, search, and show individual entries
+
+### 16c — Completion notifications
+
+- [ ] `[notify]` config section with optional `webhook_url` (Discord /
+      generic HTTP POST) and `ntfy_topic` fields
+- [ ] On upload completion (or failure), fire a POST with a summary payload
+- [ ] `--notify` / `--no-notify` flags to override the config for a run
+
+## Phase 17 — Security & privacy
+
+### 17a — Content encryption
+
+- [ ] `--encrypt <password>` flag and `encrypt` config option
+- [ ] Encrypt each file with AES-256-GCM before yEnc-encoding; store the
+      password in `<meta type="password">` in the `.nzb`
+- [ ] Pure-Rust implementation (`aes-gcm` crate); no external binary
+
+### 17b — Configurable `Message-ID` domain
+
+Already tracked under Phase 14e.
