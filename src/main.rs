@@ -78,8 +78,8 @@ struct Cli {
     #[arg(long, value_name = "USER")]
     username: Option<String>,
 
-    /// Authentication password [config: auth.password].
-    #[arg(long, value_name = "PASS")]
+    /// Authentication password for the NNTP server [config: auth.password].
+    #[arg(long = "auth-password", value_name = "PASS")]
     password: Option<String>,
 
     /// `From` header for posted articles; omitted means a random identity
@@ -117,7 +117,8 @@ struct Cli {
 
     /// Obfuscation mode: `none`, `subject` or `full`. A bare `--obfuscate`
     /// means `full` [config: posting.obfuscate, default none].
-    #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1, default_missing_value = "full")]
+    #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
+          default_missing_value = "full", require_equals = true)]
     obfuscate: Option<ObfuscateMode>,
 
     /// Percentage of PAR2 recovery data to generate; 0 disables it
@@ -158,7 +159,7 @@ struct Cli {
     /// and prints it; `--password=mypass` uses an explicit one. Implies
     /// `--compress` with the configured or default format.
     #[arg(long = "password", value_name = "PASSWORD",
-          num_args = 0..=1, default_missing_value = "", require_equals = true)]
+          num_args = 0..=1, default_missing_value = "")]
     archive_password: Option<String>,
 
     /// Files or directories to post. A directory is walked recursively and
