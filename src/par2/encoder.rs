@@ -11,6 +11,8 @@
 
 use md5::{Digest, Md5};
 use rayon::prelude::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 use super::gf16::{input_logbases, Gf16, ORDER};
 use super::packet::{md5, SliceChecksum};
@@ -41,6 +43,8 @@ pub struct RecoveryEncoder {
     buffers: Vec<Vec<u16>>,
     /// Number of input slices fed so far.
     next_index: usize,
+    /// Queue of input slices waiting to be processed (cache blocking).
+    queued_slices: Vec<Vec<u8>>,
 }
 
 impl RecoveryEncoder {
@@ -63,6 +67,7 @@ impl RecoveryEncoder {
             exponent_start,
             buffers: vec![vec![0u16; slice_size / 2]; recovery_count],
             next_index: 0,
+            queued_slices: Vec::with_capacity(64),
         }
     }
 
@@ -78,31 +83,205 @@ impl RecoveryEncoder {
             self.slice_words * 2,
             "slice length must equal the slice size"
         );
-        let index = self.next_index;
-        assert!(index < self.logbases.len(), "more slices fed than declared");
-        self.next_index += 1;
-        let logbase = self.logbases[index] as u64;
+        self.queued_slices.push(slice.to_vec());
+        if self.queued_slices.len() >= 64 {
+            self.flush();
+        }
+    }
+
+    /// Process queued slices into the recovery buffers.
+    fn flush(&mut self) {
+        if self.queued_slices.is_empty() {
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe {
+                self.flush_avx2();
+            }
+            return;
+        }
+
+        self.flush_scalar();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn flush_avx2(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        let mask_f = _mm256_set1_epi8(0x0F);
+        let mask_even = _mm256_set1_epi16(0x00FF);
 
         self.buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
             let exponent = self.exponent_start + i as u32;
-            let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-            let coeff = self.gf.exp(log_coeff);
 
-            let mut table_low = [0u16; 256];
-            let mut table_high = [0u16; 256];
-            for b in 0..=255 {
-                table_low[b as usize] = self.gf.mul(b as u16, coeff);
-                table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
+            // Precompute AVX2 shuffle tables + scalar tables for tail
+            let mut tables = Vec::with_capacity(queued.len());
+            for (q_idx, _) in queued.iter().enumerate() {
+                let logbase = self.logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = self.gf.exp(log_coeff);
+
+                let mut tl_l = [0u8; 16];
+                let mut tl_h = [0u8; 16];
+                let mut th_l = [0u8; 16];
+                let mut th_h = [0u8; 16];
+                let mut hl_l = [0u8; 16];
+                let mut hl_h = [0u8; 16];
+                let mut hh_l = [0u8; 16];
+                let mut hh_h = [0u8; 16];
+
+                for val in 0..16 {
+                    let r0 = self.gf.mul(val as u16, coeff);
+                    tl_l[val as usize] = (r0 & 0xFF) as u8;
+                    th_l[val as usize] = (r0 >> 8) as u8;
+
+                    let r1 = self.gf.mul((val as u16) << 4, coeff);
+                    tl_h[val as usize] = (r1 & 0xFF) as u8;
+                    th_h[val as usize] = (r1 >> 8) as u8;
+
+                    let r2 = self.gf.mul((val as u16) << 8, coeff);
+                    hl_l[val as usize] = (r2 & 0xFF) as u8;
+                    hh_l[val as usize] = (r2 >> 8) as u8;
+
+                    let r3 = self.gf.mul((val as u16) << 12, coeff);
+                    hl_h[val as usize] = (r3 & 0xFF) as u8;
+                    hh_h[val as usize] = (r3 >> 8) as u8;
+                }
+
+                let v_tl_l = _mm256_broadcastsi128_si256(_mm_loadu_si128(tl_l.as_ptr() as *const __m128i));
+                let v_tl_h = _mm256_broadcastsi128_si256(_mm_loadu_si128(tl_h.as_ptr() as *const __m128i));
+                let v_th_l = _mm256_broadcastsi128_si256(_mm_loadu_si128(th_l.as_ptr() as *const __m128i));
+                let v_th_h = _mm256_broadcastsi128_si256(_mm_loadu_si128(th_h.as_ptr() as *const __m128i));
+                let v_hl_l = _mm256_broadcastsi128_si256(_mm_loadu_si128(hl_l.as_ptr() as *const __m128i));
+                let v_hl_h = _mm256_broadcastsi128_si256(_mm_loadu_si128(hl_h.as_ptr() as *const __m128i));
+                let v_hh_l = _mm256_broadcastsi128_si256(_mm_loadu_si128(hh_l.as_ptr() as *const __m128i));
+                let v_hh_h = _mm256_broadcastsi128_si256(_mm_loadu_si128(hh_h.as_ptr() as *const __m128i));
+
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255 {
+                    table_low[b as usize] = self.gf.mul(b as u16, coeff);
+                    table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
+                }
+
+                tables.push((v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, table_low, table_high));
             }
 
-            for (word, chunk) in buffer.iter_mut().zip(slice.chunks_exact(2)) {
-                *word ^= table_low[chunk[0] as usize] ^ table_high[chunk[1] as usize];
+            let chunk_size = 32768; // 64KB L1 blocking
+            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
+                let byte_offset = chunk_idx * chunk_size * 2;
+                let byte_len = buffer_chunk.len() * 2;
+                let blocks_32 = byte_len / 32;
+                let remainder = byte_len % 32;
+
+                for (q_idx, slice) in queued.iter().enumerate() {
+                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
+                    let (v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, ref table_low, ref table_high) = tables[q_idx];
+
+                    let mut ptr_buf = buffer_chunk.as_mut_ptr() as *mut __m256i;
+                    let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                    let end = ptr_in.add(blocks_32);
+
+                    while ptr_in < end {
+                        let input = _mm256_loadu_si256(ptr_in);
+
+                        let n0_2 = _mm256_and_si256(input, mask_f);
+                        let n1_3 = _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
+
+                        let res_lo_even = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l, n0_2), _mm256_shuffle_epi8(v_tl_h, n1_3));
+                        let res_hi_even = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l, n0_2), _mm256_shuffle_epi8(v_th_h, n1_3));
+
+                        let res_lo_odd = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l, n0_2), _mm256_shuffle_epi8(v_hl_h, n1_3));
+                        let res_hi_odd = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l, n0_2), _mm256_shuffle_epi8(v_hh_h, n1_3));
+
+                        let sum_lo_even = _mm256_xor_si256(res_lo_even, _mm256_srli_epi16(res_lo_odd, 8));
+                        let sum_hi_even = _mm256_xor_si256(res_hi_even, _mm256_srli_epi16(res_hi_odd, 8));
+
+                        let r_l_masked = _mm256_and_si256(sum_lo_even, mask_even);
+                        let r_h_shifted = _mm256_slli_epi16(sum_hi_even, 8);
+
+                        let out = _mm256_or_si256(r_l_masked, r_h_shifted);
+
+                        let prev = _mm256_loadu_si256(ptr_buf);
+                        _mm256_storeu_si256(ptr_buf, _mm256_xor_si256(prev, out));
+
+                        ptr_in = ptr_in.add(1);
+                        ptr_buf = ptr_buf.add(1);
+                    }
+
+                    if remainder > 0 {
+                        let offset_words = blocks_32 * 16;
+                        let mut ptr_word = buffer_chunk[offset_words..].as_mut_ptr();
+                        let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
+                        let tail_end = p_in.add(remainder);
+
+                        while p_in < tail_end {
+                            let lo = *p_in as usize;
+                            let hi = *p_in.add(1) as usize;
+                            *ptr_word ^= table_low[lo] ^ table_high[hi];
+                            ptr_word = ptr_word.add(1);
+                            p_in = p_in.add(2);
+                        }
+                    }
+                }
             }
         });
+
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    fn flush_scalar(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        self.buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
+            let exponent = self.exponent_start + i as u32;
+
+            let mut tables = Vec::with_capacity(queued.len());
+            for (q_idx, _) in queued.iter().enumerate() {
+                let logbase = self.logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = self.gf.exp(log_coeff);
+
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255 {
+                    table_low[b as usize] = self.gf.mul(b as u16, coeff);
+                    table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
+                }
+                tables.push((table_low, table_high));
+            }
+
+            let chunk_size = 32768;
+            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
+                let byte_offset = chunk_idx * chunk_size * 2;
+                let byte_len = buffer_chunk.len() * 2;
+
+                for (q_idx, slice) in queued.iter().enumerate() {
+                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
+                    let (ref table_low, ref table_high) = tables[q_idx];
+
+                    for (word, chunk) in buffer_chunk.iter_mut().zip(slice_chunk.chunks_exact(2)) {
+                        *word ^= table_low[chunk[0] as usize] ^ table_high[chunk[1] as usize];
+                    }
+                }
+            }
+        });
+
+        self.queued_slices = queued;
+        self.queued_slices.clear();
     }
 
     /// Consume the encoder and return the finished recovery slices.
-    pub fn finish(self) -> Vec<RecoverySlice> {
+    pub fn finish(mut self) -> Vec<RecoverySlice> {
+        self.flush();
         let exponent_start = self.exponent_start;
         self.buffers
             .into_iter()
