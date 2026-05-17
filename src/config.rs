@@ -5,10 +5,11 @@
 //! [`Config`] is the fully resolved, validated result used by the rest of the
 //! program.
 
+use crate::article::random_from;
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Default NNTP-over-TLS port.
 pub const DEFAULT_PORT: u16 = 563;
@@ -16,6 +17,31 @@ pub const DEFAULT_PORT: u16 = 563;
 pub const DEFAULT_CONNECTIONS: usize = 4;
 /// Default target size of each article body, in bytes.
 pub const DEFAULT_ARTICLE_SIZE: usize = 768_000;
+/// Default yEnc line length, in encoded characters.
+pub const DEFAULT_LINE_LENGTH: usize = 128;
+/// Default number of post attempts per segment before giving up.
+pub const DEFAULT_RETRIES: u32 = 3;
+/// Default pause between failed post attempts, in seconds.
+pub const DEFAULT_RETRY_DELAY: u64 = 1;
+/// Default percentage of PAR2 recovery data to generate.
+pub const DEFAULT_PAR2: u8 = 10;
+
+/// Path of the config file `pesto` loads when `--config` is not given.
+///
+/// Follows the XDG Base Directory spec: `$XDG_CONFIG_HOME/pesto/config.toml`,
+/// falling back to `$HOME/.config/pesto/config.toml`. Returns `None` only when
+/// neither environment variable is set.
+pub fn default_config_path() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("pesto").join("config.toml"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("pesto")
+            .join("config.toml")
+    })
+}
 
 /// How much of a post to obfuscate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, ValueEnum)]
@@ -44,6 +70,8 @@ pub struct FileConfig {
     pub auth: AuthSection,
     #[serde(default)]
     pub posting: PostingSection,
+    #[serde(default)]
+    pub output: OutputSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,6 +81,8 @@ pub struct ServerSection {
     pub port: Option<u16>,
     pub ssl: Option<bool>,
     pub connections: Option<usize>,
+    /// Seconds to wait between failed post attempts.
+    pub retry_delay: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -68,8 +98,19 @@ pub struct PostingSection {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
+    /// yEnc line length, in encoded characters.
+    pub line_length: Option<usize>,
+    /// Post attempts per segment before it is recorded as failed.
+    pub retries: Option<u32>,
     pub obfuscate: Option<ObfuscateMode>,
     pub par2: Option<u8>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSection {
+    /// Default path for the generated `.nzb`. Overridden by `--out`.
+    pub nzb: Option<String>,
 }
 
 impl FileConfig {
@@ -94,6 +135,9 @@ pub struct Overrides {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
+    pub line_length: Option<usize>,
+    pub retries: Option<u32>,
+    pub retry_delay: Option<u64>,
     pub obfuscate: Option<ObfuscateMode>,
     pub dry_run: Option<bool>,
     pub par2: Option<u8>,
@@ -112,6 +156,12 @@ pub struct Config {
     pub from: String,
     pub groups: Vec<String>,
     pub article_size: usize,
+    /// yEnc line length, in encoded characters.
+    pub line_length: usize,
+    /// Post attempts per segment before it is recorded as failed.
+    pub retries: u32,
+    /// Seconds to wait between failed post attempts.
+    pub retry_delay: u64,
     /// How much of each post to obfuscate.
     pub obfuscate: ObfuscateMode,
     /// If true, skip the network and just simulate posting.
@@ -141,16 +191,14 @@ impl Config {
                 .context("no `host` set: provide [server].host or --host")?
         };
 
-        let from = if par2_only {
-            cli.from.or(file.posting.from).unwrap_or_else(|| "none".into())
-        } else {
-            cli.from
-                .or(file.posting.from)
-                .context("no `from` set: provide [posting].from or --from")?
-        };
+        // A `from` is never required: when the user pins neither a config
+        // value nor `--from`, post under a freshly generated random identity.
+        let from = cli.from.or(file.posting.from).unwrap_or_else(random_from);
 
         let groups = if par2_only {
-            cli.groups.or(file.posting.groups).unwrap_or_else(|| vec!["none".into()])
+            cli.groups
+                .or(file.posting.groups)
+                .unwrap_or_else(|| vec!["none".into()])
         } else {
             cli.groups
                 .or(file.posting.groups)
@@ -174,9 +222,22 @@ impl Config {
                 .article_size
                 .or(file.posting.article_size)
                 .unwrap_or(DEFAULT_ARTICLE_SIZE),
+            line_length: cli
+                .line_length
+                .or(file.posting.line_length)
+                .unwrap_or(DEFAULT_LINE_LENGTH),
+            retries: cli
+                .retries
+                .or(file.posting.retries)
+                .unwrap_or(DEFAULT_RETRIES)
+                .max(1),
+            retry_delay: cli
+                .retry_delay
+                .or(file.server.retry_delay)
+                .unwrap_or(DEFAULT_RETRY_DELAY),
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
-            par2: cli.par2.or(file.posting.par2).unwrap_or(10),
+            par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
             par2_only,
         })
     }

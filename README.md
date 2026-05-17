@@ -2,8 +2,8 @@
 
 Fast, lean Usenet poster, written in Rust.
 
-It takes a list of files, encodes them with yEnc, posts the articles to Usenet
-groups over NNTP, and generates an `.nzb` file. Inspired by
+It takes files and directories, encodes them with yEnc, posts the articles to
+Usenet groups over NNTP, and generates an `.nzb` file. Inspired by
 [`nyuu`](https://github.com/animetosho/Nyuu), but with a minimal scope: just
 the basics, executed extremely fast.
 
@@ -12,7 +12,8 @@ It will be integrated into the posting flow of the `upapasta` program.
 ## Status
 
 The MVP is complete: yEnc encoding, parallel TLS posting and `.nzb` generation
-all work end to end. See [`ROADMAP.md`](ROADMAP.md) for what comes next.
+all work end to end, plus pure-Rust PAR2 recovery, posting obfuscation and
+recursive directory uploads. See [`ROADMAP.md`](ROADMAP.md) for what comes next.
 
 ## Build
 
@@ -26,12 +27,39 @@ The optimized binary is written to `target/release/pesto`.
 
 ## Usage
 
+First-time setup — create a config file with the guided wizard:
+
 ```bash
-pesto --config config.toml --out upload.nzb file1 file2 ...
+pesto --config
 ```
 
-Server and credentials come from a TOML config file; any field can be
-overridden on the command line. See [`config.example.toml`](config.example.toml).
+This writes `~/.config/pesto/config.toml` (or `$XDG_CONFIG_HOME/pesto/`).
+`pesto` loads that file automatically, so afterwards posting is just:
+
+```bash
+pesto movie.mkv
+```
+
+Running `pesto` with no arguments prints a short orientation screen. Any
+config value can still be overridden on the command line, and an explicit
+file can be loaded with `pesto --config <PATH> ...`. See
+[`config.example.toml`](config.example.toml) for every option.
+
+### Posting a directory
+
+A `PATH` argument may be a directory — a TV-show season, or any folder with
+nested subfolders:
+
+```bash
+pesto ./MyShow.S01/
+```
+
+The directory is walked recursively and the whole tree is posted as one
+upload. The folder structure is preserved in the `.nzb` and the PAR2 metadata,
+so a downloader rebuilds the original layout — including nested subfolders —
+on repair. Files starting with `.` are included; symlinks inside the tree are
+skipped. With no `--out`, the `.nzb` is named after the root folder
+(`MyShow.S01.nzb`).
 
 ### Without a config file
 
@@ -52,17 +80,24 @@ pesto \
 
 | Flag | Description |
 |------|-------------|
-| `-c`, `--config <PATH>` | TOML config file |
+| `-c`, `--config [PATH]` | Load a TOML config file; with no value, run the setup wizard |
 | `--host <HOST>` | NNTP server hostname |
 | `--port <PORT>` | NNTP server port (default 563) |
 | `--no-ssl` | Disable TLS |
 | `--connections <N>` | Number of parallel connections (default 4) |
+| `--retry-delay <SECS>` | Seconds between failed post attempts (default 1) |
 | `--username <USER>` | Authentication username |
 | `--password <PASS>` | Authentication password |
-| `--from <FROM>` | `From` header for posted articles |
+| `--from <ADDRESS>` | `From` header; omitted means a random identity per run |
 | `--groups <G,...>` | Newsgroups to post to (comma-separated) |
+| `--article-size <BYTES>` | Target size of each segment (default 768000) |
+| `--line-length <CHARS>` | yEnc line length (default 128) |
+| `--retries <N>` | Post attempts per segment (default 3) |
 | `-o`, `--out <PATH>` | Path of the `.nzb` file to write |
 | `--obfuscate[=MODE]` | Obfuscation mode: `none`, `subject` or `full` (bare flag = `full`) |
+| `--par2 <PERCENT>` | PAR2 recovery data percentage (default 10, 0 disables) |
+| `--par2-only` | Only generate PAR2 files; do not post |
+| `--dry-run` | Encode only, never touch the network |
 
 ### Exit codes
 
