@@ -57,7 +57,47 @@ Each phase must leave the program in a working, testable state.
 - [x] Real file name preserved in the `.nzb` `<file name>` attribute
 - [x] Tests for obfuscated-name generation and `.nzb` output
 
-## Phase 7 — `upapasta` integration
+## Phase 7 — PAR2 generation
+
+Own pure-Rust PAR2 creator — no `par2cmdline` / `parpar` dependency. Parity is
+computed in the *same single read pass* used for posting: each slice, as it is
+read and yEnc-encoded for upload, is also accumulated into the Reed-Solomon
+recovery buffers. The PAR2 slice size is aligned with the yEnc article size,
+so one read block is one article and one input slice.
+
+### 7a — GF(2^16) field and Reed-Solomon matrix
+
+- [ ] GF(2^16) arithmetic (generator `0x1100B`), log/antilog tables
+- [ ] PAR2 input-constant and recovery-exponent generation, bit-exact with
+      `par2cmdline`
+- [ ] Tests cross-checked against known `par2cmdline` constants
+
+### 7b — PAR2 packet format
+
+- [ ] Packet framing, MD5 packet hashes, recovery set ID
+- [ ] Main, File Description, Input File Slice Checksum, Recovery Slice and
+      Creator packets
+- [ ] Volume-split layout (index + `volNNN+MMM` files, exponential counts)
+
+### 7c — Streaming Reed-Solomon encoder
+
+- [ ] Accumulate input slices one at a time into N recovery buffers
+- [ ] Per-slice MD5 + CRC32 and per-file MD5 computed while streaming
+- [ ] Validate generated PAR2 with `par2cmdline` (verify + repair)
+
+### 7d — Pipeline integration
+
+- [ ] Refactor the poster into a single-reader producer feeding the posting
+      pool through a bounded channel
+- [ ] Compute parity during the read pass; post PAR2 articles after the data
+- [ ] Include the PAR2 files in the `.nzb`
+- [ ] `--par2 <percent>` flag and config option; 10% default
+
+### 7e — Performance
+
+- [ ] SIMD GF multiply; recovery buffers partitioned across threads
+
+## Phase 8 — `upapasta` integration
 
 - [ ] Stabilize the public API of `lib.rs`
 - [ ] Document integration points
@@ -66,7 +106,6 @@ Each phase must leave the program in a working, testable state.
 ## Post-MVP (future ideas)
 
 - Compression / RAR creation before posting
-- PAR2 file generation
 - Resume of interrupted posts
 - Rate limiting
 - Multiple servers / failover
