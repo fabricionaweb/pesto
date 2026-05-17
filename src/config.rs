@@ -221,6 +221,12 @@ pub struct OutputSection {
     /// Newznab indexer upload configuration.
     #[serde(default)]
     pub indexer: IndexerSection,
+    /// Shell command to execute after a successful upload. Receives upload
+    /// details via environment variables (`PESTO_NZB`, `PESTO_NFO`, …).
+    pub post_hook: Option<String>,
+    /// Generate a `.nfo` file alongside the `.nzb` after posting.
+    /// Default: false.
+    pub nfo: Option<bool>,
 }
 
 /// Newznab API configuration for automatic NZB upload after posting.
@@ -312,6 +318,10 @@ pub struct Overrides {
     pub no_archive: Option<bool>,
     /// Fixed domain for `Message-ID`. `None` = random per article.
     pub message_id_domain: Option<String>,
+    /// Shell command to run after a successful upload.
+    pub post_hook: Option<String>,
+    /// Generate a `.nfo` file next to the `.nzb` after posting.
+    pub nfo: Option<bool>,
 }
 
 /// Fully resolved, validated configuration.
@@ -388,6 +398,10 @@ pub struct Config {
     /// When `Some(true)`, force notifications even if no URL is configured
     /// in the file config (rarely useful; `--notify` does nothing without a URL).
     pub notify: Option<bool>,
+    /// Shell command to run after a successful upload.
+    pub post_hook: Option<String>,
+    /// Generate a `.nfo` file next to the `.nzb` after posting.
+    pub nfo: bool,
 }
 
 impl Config {
@@ -563,6 +577,8 @@ impl Config {
             date: cli.date.or(file.posting.date),
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
+            post_hook: cli.post_hook.or(file.output.post_hook),
+            nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
         })
     }
 }
