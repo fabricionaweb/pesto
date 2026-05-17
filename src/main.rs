@@ -426,7 +426,7 @@ async fn run_single_upload(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Derive NZB path: --out > --nzb-default > <stem-of-first-input>.nzb
+    // Derive NZB path: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
     let nzb_out_path: Option<PathBuf> = params
         .out
         .clone()
@@ -441,7 +441,13 @@ async fn run_single_upload(
                         .into_owned()
                 })
             })?;
-            Some(PathBuf::from(format!("{stem}.nzb")))
+            let filename = format!("{stem}.nzb");
+            let path = if let Some(dir) = &config.nzb_dir {
+                PathBuf::from(dir).join(&filename)
+            } else {
+                PathBuf::from(filename)
+            };
+            Some(path)
         });
     let resume_path: Option<PathBuf> = nzb_out_path
         .as_ref()

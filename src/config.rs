@@ -186,6 +186,9 @@ pub struct PostingSection {
 pub struct OutputSection {
     /// Default path for the generated `.nzb`. Overridden by `--out`.
     pub nzb: Option<String>,
+    /// Directory where `.nzb` files are written by default. The filename is
+    /// derived from the upload name. Overridden by `--out` or `output.nzb`.
+    pub nzb_dir: Option<String>,
     /// Friendly name emitted as `<meta type="name">` in the `.nzb`.
     pub nzb_name: Option<String>,
     /// Extraction password emitted as `<meta type="password">` in the `.nzb`.
@@ -319,6 +322,9 @@ pub struct Config {
     pub indexer_url: Option<String>,
     pub indexer_api_key: Option<String>,
     pub indexer_category: Option<String>,
+    /// Default directory for `.nzb` output. The filename is derived from the
+    /// upload name. Overridden by `--out` or `output.nzb`.
+    pub nzb_dir: Option<String>,
     /// Skip the indexer upload for this run.
     pub no_upload: bool,
 }
@@ -484,6 +490,7 @@ impl Config {
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: cli.nzb_category.or(file.output.nzb_category),
+            nzb_dir: file.output.nzb_dir,
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
