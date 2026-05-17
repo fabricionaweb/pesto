@@ -65,13 +65,11 @@ pub fn generate(
     .filter_map(|(k, v)| v.map(|s| (k, s)))
     .collect();
 
-    if !metas.is_empty() {
-        out.push_str("  <head>\n");
-        for (k, v) in &metas {
-            out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
-        }
-        out.push_str("  </head>\n");
+    out.push_str("  <head>\n");
+    for (k, v) in &metas {
+        out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
     }
+    out.push_str("  </head>\n");
 
     // Segments arrive sorted by (file_name, part); group consecutive runs.
     let mut i = 0;
@@ -260,9 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn no_head_block_when_meta_is_empty() {
+    fn head_block_always_present() {
+        // <head> is emitted even when no meta fields are set, for maximum
+        // compatibility with strict NZB parsers.
         let xml = generate("p <p@x>", &["alt.test".into()], &[], &no_meta(), false);
-        assert!(!xml.contains("<head>"));
+        assert!(xml.contains("<head>"));
+        assert!(xml.contains("</head>"));
         assert!(!xml.contains("<meta"));
     }
 

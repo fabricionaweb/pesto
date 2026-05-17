@@ -164,7 +164,7 @@ fn compress_with_rar(
     run_command(cmd, "rar")
 }
 
-fn find_binary(name: &str) -> Option<PathBuf> {
+pub fn find_binary(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .as_deref()
         .unwrap_or_default()
