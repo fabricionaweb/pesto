@@ -427,12 +427,17 @@ and PAR2 recovery writing were silent (or a single `eprintln!`).
 - [x] `--history` / `--no-history` flag (default: enabled); config key
       `output.history`; disabled automatically for `--par2-only` and `--dry-run`
 
-### 16e — Completion notifications
+### 16e — Completion notifications ✅
 
-- [ ] `[notify]` config section with optional `webhook_url` (Discord /
-      generic HTTP POST) and `ntfy_topic` fields
-- [ ] On upload completion (or failure), fire a POST with a summary payload
-- [ ] `--notify` / `--no-notify` flags to override the config for a run
+- [x] `[notify]` config section with `webhook_url` (Discord / Slack /
+      Telegram / generic HTTP POST) and `ntfy_topic` fields
+- [x] On upload completion (or failure), fire a POST with a summary payload;
+      payload format mirrors upapasta `_webhook.py` (Discord: `{"content"}`,
+      Slack/Telegram: `{"text"}`, generic: rich JSON object)
+- [x] ntfy.sh: plain-text body with `Title`, `Priority` and `Tags` headers
+- [x] `--notify` / `--no-notify` flags override the config for a run
+- [x] Errors are non-fatal — a failed notification never aborts the upload
+- [x] Notifications suppressed automatically for `--par2-only` and `--dry-run`
 
 ## Phase 17 — Security & privacy
 

@@ -230,6 +230,16 @@ struct Cli {
     #[arg(long)]
     no_history: bool,
 
+    /// Enable completion notifications for this run even if not configured
+    /// in the config file [config: [notify]].
+    #[arg(long)]
+    notify: bool,
+
+    /// Suppress completion notifications for this run
+    /// [config: [notify].webhook_url / ntfy_topic].
+    #[arg(long)]
+    no_notify: bool,
+
     /// Treat each top-level entry in a directory argument as an independent
     /// upload with its own NZB. PAR2 and NZB naming follow the entry name.
     /// Combine with --jobs for parallel uploads.
@@ -313,6 +323,13 @@ impl Cli {
             nzb_dir: self.nzb_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
             no_upload: self.no_upload,
             history: if self.no_history { Some(false) } else { None },
+            notify: if self.no_notify {
+                Some(false)
+            } else if self.notify {
+                Some(true)
+            } else {
+                None
+            },
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
@@ -622,6 +639,23 @@ async fn run_single_upload(
                 }
             }
         }
+    }
+
+    // Send completion notifications.
+    let notify_enabled = config.notify.unwrap_or(true)
+        && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
+    if notify_enabled && !config.par2_only && !config.dry_run {
+        let had_failures = outcome.cancelled || !outcome.failures.is_empty();
+        pesto::notify::send_all(&pesto::notify::NotifyConfig {
+            webhook_url: config.notify_webhook.as_deref(),
+            ntfy_topic: config.notify_ntfy.as_deref(),
+            name: entry_label,
+            total_bytes,
+            group: config.groups.first().map(String::as_str),
+            category: config.nzb_category.as_deref(),
+            ok: !had_failures,
+        })
+        .await;
     }
 
     // Cleanup temp dirs.

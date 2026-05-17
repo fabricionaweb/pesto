@@ -153,6 +153,8 @@ pub struct FileConfig {
     pub output: OutputSection,
     #[serde(default)]
     pub compression: CompressionSection,
+    #[serde(default)]
+    pub notify: NotifySection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -240,6 +242,16 @@ pub struct CompressionSection {
     pub format: Option<String>,
 }
 
+/// `[notify]` config section for completion notifications.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifySection {
+    /// HTTP webhook URL (Discord, Slack, Telegram, or generic).
+    pub webhook_url: Option<String>,
+    /// ntfy.sh topic name or full topic URL.
+    pub ntfy_topic: Option<String>,
+}
+
 impl FileConfig {
     /// Load and parse a TOML config file.
     pub fn load(path: &Path) -> Result<Self> {
@@ -292,6 +304,8 @@ pub struct Overrides {
     pub no_upload: bool,
     /// Override history writing: `Some(false)` = `--no-history`.
     pub history: Option<bool>,
+    /// `--no-notify`: suppress notifications for this run.
+    pub notify: Option<bool>,
     /// `Date:` header mode: `"now"`, `"random"`, or a fixed RFC 2822 string.
     pub date: Option<String>,
     /// Add `X-No-Archive: yes` to every posted article.
@@ -366,6 +380,14 @@ pub struct Config {
     pub no_upload: bool,
     /// Append a record to the shared history catalog after each upload.
     pub history: bool,
+    /// Webhook URL for completion notifications.
+    pub notify_webhook: Option<String>,
+    /// ntfy.sh topic name or URL for completion notifications.
+    pub notify_ntfy: Option<String>,
+    /// When `Some(false)`, skip notifications for this run (`--no-notify`).
+    /// When `Some(true)`, force notifications even if no URL is configured
+    /// in the file config (rarely useful; `--notify` does nothing without a URL).
+    pub notify: Option<bool>,
 }
 
 impl Config {
@@ -535,6 +557,9 @@ impl Config {
             indexer_category: file.output.indexer.category,
             no_upload: cli.no_upload,
             history: cli.history.unwrap_or_else(|| file.output.history.unwrap_or(true)),
+            notify_webhook: file.notify.webhook_url,
+            notify_ntfy: file.notify.ntfy_topic,
+            notify: cli.notify,
             date: cli.date.or(file.posting.date),
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
