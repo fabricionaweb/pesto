@@ -531,6 +531,14 @@ async fn producer(
         par2_files.push(FileHasher::new());
     }
 
+    // Announce how many recovery slices will be written across all passes, so
+    // the renderer can show a progress bar for the PAR2 write phase.
+    if recovery_count > 0 {
+        shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {
+            total: recovery_count as u32,
+        });
+    }
+
     let mut par2_dir = None;
     let mut base_packets = Vec::new();
     let mut rsid = [0u8; 16];
@@ -753,6 +761,7 @@ async fn producer(
                     &packet::recovery_body(slice.exponent, &slice.data),
                 );
                 file.write_all(&pkt).await?;
+                shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
                 if slice.exponent == vol.first + vol.count - 1 {
                     if let Some(tx) = &tx_opt {

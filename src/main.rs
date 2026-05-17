@@ -246,6 +246,10 @@ async fn main() -> Result<()> {
     let mut inputs = pesto::walk::expand_inputs(&cli.files)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
 
+    // Install the terminal progress panel early so it covers both compression
+    // and posting. The renderer owns all terminal drawing.
+    let (progress_tx, renderer) = pesto::progress::spawn_terminal_renderer();
+
     // ── Compression (Phase 13) ────────────────────────────────────────────
     // Resolve whether to compress and with what format/password.
     let compress_format_str: Option<String> = config
@@ -307,16 +311,53 @@ async fn main() -> Result<()> {
         // loose files it's each file's path individually.
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
 
-        eprintln!("compressing {} item(s) to {}.{}...",
-            fs_paths.len(), archive_stem, format.extension());
+        // Sum of input sizes: a tight upper bound for the archive in store mode.
+        let compress_input_bytes: u64 = fs_paths
+            .iter()
+            .map(|p| dir_or_file_size(p))
+            .sum();
 
-        let result = compress(
-            &fs_paths,
-            &archive_stem,
-            &tmp_dir,
-            format,
-            effective_password.as_deref(),
-        )?;
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
+            total_bytes: compress_input_bytes,
+        });
+
+        // Poll the archive file size every 200 ms while the compressor runs.
+        let archive_path_for_poll = tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
+        let poll_tx = progress_tx.clone();
+        let poll_path = archive_path_for_poll.clone();
+        let poll_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
+                    let _ = poll_tx.send(pesto::progress::ProgressEvent::CompressProgress {
+                        bytes_written: meta.len(),
+                    });
+                }
+            }
+        });
+
+        // Run the blocking compressor on a dedicated thread so the tokio
+        // scheduler (and the progress renderer) stay responsive.
+        let compress_inputs = fs_paths.clone();
+        let compress_stem = archive_stem.clone();
+        let compress_dest = tmp_dir.clone();
+        let compress_pass = effective_password.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            compress(
+                &compress_inputs,
+                &compress_stem,
+                &compress_dest,
+                format,
+                compress_pass.as_deref(),
+            )
+        })
+        .await
+        .context("compressor task panicked")??;
+
+        poll_handle.abort();
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
 
         // Replace the input list with the single archive file.
         let archive_name = result.path
@@ -365,9 +406,6 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| p.with_extension("pesto-state"));
 
-    // Install the terminal progress panel. The poster only emits events; the
-    // renderer task owns all terminal drawing and is awaited once posting ends.
-    let (progress_tx, renderer) = pesto::progress::spawn_terminal_renderer();
     let outcome = pesto::poster::post_files_with_progress(
         &config,
         &inputs,
@@ -486,6 +524,23 @@ fn upload_root(inputs: &[pesto::walk::InputFile]) -> Option<String> {
         }
     }
     root.map(str::to_string)
+}
+
+/// Recursively sum bytes for a path that may be a file or a directory.
+fn dir_or_file_size(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Err(_) => 0,
+        Ok(m) if m.is_file() => m.len(),
+        Ok(_) => {
+            let mut total = 0u64;
+            if let Ok(rd) = std::fs::read_dir(path) {
+                for entry in rd.flatten() {
+                    total += dir_or_file_size(&entry.path());
+                }
+            }
+            total
+        }
+    }
 }
 
 /// Aggregate the upload as `(file count, subfolder count, total bytes)`.
