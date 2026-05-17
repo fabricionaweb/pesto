@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn slot_quit_when_not_connected_is_noop() {
         // Should not panic when there is no open connection.
-        let mut slot = ConnectionSlot::new(arc(vec![server(1)]), 0);
+        let slot = ConnectionSlot::new(arc(vec![server(1)]), 0);
         // Can't call async quit in a sync test, but we can verify the slot
         // has no connection to begin with.
         assert!(slot.conn.is_none());
