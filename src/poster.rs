@@ -1071,7 +1071,7 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, FileConfig, ObfuscateMode, Overrides};
+    use crate::config::{Config, FileConfig, Overrides};
     use crate::walk::InputFile;
     use tempfile::TempDir;
 
@@ -1170,7 +1170,7 @@ mod tests {
     async fn dry_run_produces_segments_without_network() {
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("sample.bin");
-        std::fs::write(&f, &vec![0u8; 1500]).unwrap();
+        std::fs::write(&f, vec![0u8; 1500]).unwrap();
 
         let files = vec![InputFile {
             path: f.clone(),
@@ -1193,7 +1193,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("big.bin");
         // Use a tiny article_size to force multiple segments.
-        std::fs::write(&f, &vec![0u8; 300]).unwrap();
+        std::fs::write(&f, vec![0u8; 300]).unwrap();
 
         let files = vec![InputFile {
             path: f,
@@ -1341,8 +1341,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let f1 = dir.path().join("b.bin");
         let f2 = dir.path().join("a.bin");
-        std::fs::write(&f1, &vec![0u8; 100]).unwrap();
-        std::fs::write(&f2, &vec![0u8; 100]).unwrap();
+        std::fs::write(&f1, vec![0u8; 100]).unwrap();
+        std::fs::write(&f2, vec![0u8; 100]).unwrap();
 
         let files = vec![
             InputFile {
@@ -1374,7 +1374,7 @@ mod tests {
     async fn dry_run_subject_obfuscation_hides_real_name_in_subject() {
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("secret.mkv");
-        std::fs::write(&f, &vec![0u8; 100]).unwrap();
+        std::fs::write(&f, vec![0u8; 100]).unwrap();
 
         let files = vec![InputFile {
             path: f,
@@ -1408,7 +1408,7 @@ mod tests {
         // Message-IDs even when a state file with recorded entries is present.
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("r.bin");
-        std::fs::write(&f, &vec![0u8; 100]).unwrap();
+        std::fs::write(&f, vec![0u8; 100]).unwrap();
 
         let state_path = dir.path().join("r.bin.pesto-state");
         let mut state = crate::resume::ResumeState::default();
