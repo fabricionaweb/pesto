@@ -499,3 +499,18 @@ scripts (Python, Bash, PowerShell, …) can react without polling.
 - [x] Hook exit status is logged; a non-zero exit never aborts or fails the
       upload — the post already succeeded at that point
 - [x] Hook is suppressed for `--par2-only`, `--dry-run`, and failed uploads
+
+### 18c — Hooks directory & bundled examples ✅
+
+- [x] Any executable file placed in `~/.config/pesto/hooks/` is run
+      automatically after each successful upload (sorted alphabetically)
+- [x] Unix: executability determined by file permission bits (`chmod +x`)
+- [x] Windows: `.exe`, `.cmd`, `.bat`, `.ps1`, `.py` extensions treated as
+      runnable; no `chmod` required
+- [x] One failing hook is logged and skipped; the remaining hooks still run
+- [x] `examples/hooks/print-vars.sh` — starter hook that prints every
+      `PESTO_*` variable; installed to `~/.config/pesto/hooks/` by default
+- [x] `examples/hooks/curupira.sh` — production-ready hook that uploads the
+      `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via
+      its REST API; adapted from the equivalent `upapasta` hook with
+      `UPAPASTA_*` variables replaced by `PESTO_*`
