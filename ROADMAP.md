@@ -295,14 +295,34 @@ compressed media).
 
 ## Phase 16 — Observability & UX
 
-### 16a — JSON output mode
+### 16a — Per-phase progress with ETA ✅
+
+Prior to this phase the terminal panel only covered the posting step; compression
+and PAR2 recovery writing were silent (or a single `eprintln!`).
+
+- [x] Terminal renderer installed **before** compression so the panel covers
+      every phase from start to finish
+- [x] Compression phase: `compress()` runs in `spawn_blocking`; a parallel
+      200 ms polling task watches the archive file size on disk and emits
+      `CompressProgress` events; panel shows a bar, speed, and ETA
+      (tight bound in store mode: archive ≈ sum of input sizes)
+- [x] PAR2 recovery computation: status line shows elapsed time
+      (`▸ computing PAR2 recovery data · 0:12`) so the user knows the RS
+      encode is running, not stalled
+- [x] PAR2 volume writing: `Par2WriteStarted { total }` + `Par2SliceWritten`
+      events; panel shows `▸ PAR2 [████░░░░] X/Y slices · ETA N:NN`
+- [x] Non-TTY / CI mode: dedicated plain log lines for each phase
+- [x] Five new `ProgressEvent` variants: `CompressStarted`, `CompressProgress`,
+      `CompressDone`, `Par2WriteStarted`, `Par2SliceWritten`
+
+### 16c — JSON output mode
 
 - [ ] `--output-format json` flag
 - [ ] Progress events emitted as newline-delimited JSON to stdout; final
       result summary as a single JSON object
 - [ ] Designed for scripting and `upapasta` integration
 
-### 16b — Upload history log
+### 16d — Upload history log
 
 - [ ] Store a record of each completed upload in
       `~/.local/share/pesto/history.db` (SQLite via `rusqlite`)
@@ -310,7 +330,7 @@ compressed media).
       subject base
 - [ ] `pesto history` subcommand: list, search, and show individual entries
 
-### 16c — Completion notifications
+### 16e — Completion notifications
 
 - [ ] `[notify]` config section with optional `webhook_url` (Discord /
       generic HTTP POST) and `ntfy_topic` fields
