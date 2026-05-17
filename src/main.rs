@@ -112,7 +112,12 @@ async fn main() -> Result<()> {
 
     let config = Config::resolve(file_config, cli.overrides())?;
 
-    let outcome = pesto::poster::post_files(&config, &cli.files).await?;
+    // Install the terminal progress panel. The poster only emits events; the
+    // renderer task owns all terminal drawing and is awaited once posting ends.
+    let (progress_tx, renderer) = pesto::progress::spawn_terminal_renderer();
+    let outcome =
+        pesto::poster::post_files_with_progress(&config, &cli.files, Some(progress_tx)).await?;
+    let _ = renderer.await;
 
     if config.par2_only {
         println!("PAR2 generation complete.");
