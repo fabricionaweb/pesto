@@ -62,7 +62,10 @@ fn is_obfuscated_name(s: &str) -> bool {
 /// Build a two-root directory tree under a fresh temp directory and return
 /// `(temp_root, [directory args], [expected relative paths])`.
 fn build_tree() -> (std::path::PathBuf, Vec<std::path::PathBuf>, Vec<String>) {
-    let root = std::env::temp_dir().join(format!("pesto_obf_dir_{}", std::process::id()));
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("pesto_obf_dir_{}_{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&root);
 
     let rels = [
