@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: pesto
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: pesto
+            musl: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: pesto.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        run: rustup toolchain install stable --target ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Rename binaries
+        run: |
+          mv x86_64-unknown-linux-gnu/pesto pesto-linux-x86_64
+          mv x86_64-unknown-linux-musl/pesto pesto-linux-x86_64-musl
+          mv x86_64-pc-windows-msvc/pesto.exe pesto-windows-x86_64.exe
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pesto-linux-x86_64
+            pesto-linux-x86_64-musl
+            pesto-windows-x86_64.exe
+          generate_release_notes: true
