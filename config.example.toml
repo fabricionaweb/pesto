@@ -107,7 +107,11 @@ groups = ["alt.binaries.test"]
 # format = "7z"
 
 [output]
-# nzb — default path for the generated .nzb file. Overridden by --out.
-# When unset, an .nzb is written only if --out is given — except for a
-# directory upload, which defaults to a .nzb named after the root folder.
+# nzb_dir — directory where .nzb files are saved by default.
+# The filename is derived from the upload name (<stem>.nzb).
+# Overridden by --out or output.nzb.
+# nzb_dir = "/home/user/nzbs"
+
+# nzb — fixed path for the generated .nzb file. Overrides nzb_dir.
+# Overridden by --out.
 # nzb = "upload.nzb"
