@@ -415,7 +415,7 @@ async fn run_single_upload(
             anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
         })?;
 
-        if format == ArchiveFormat::Rar && effective_password.is_some() {
+        if format == ArchiveFormat::Rar && pesto::compress::find_binary("rar").is_none() {
             eprintln!("note: rar password protection requires the `rar` binary in PATH");
         }
 
