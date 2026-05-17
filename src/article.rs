@@ -64,6 +64,45 @@ pub fn obfuscated_name() -> String {
     format!("{high:016x}{low:016x}")
 }
 
+/// A fresh source of randomness. `RandomState` is seeded by the OS on every
+/// construction, so each call yields an unrelated 64-bit value — the same
+/// trick used for `Message-ID`s, which keeps `pesto` free of an RNG crate.
+fn rand_u64() -> u64 {
+    RandomState::new().build_hasher().finish()
+}
+
+/// Build a string of `len` random lowercase ASCII letters.
+fn random_alpha(len: usize) -> String {
+    const ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    let mut s = String::with_capacity(len);
+    let (mut bits, mut left) = (0u64, 0u32);
+    for _ in 0..len {
+        if left < 8 {
+            bits = rand_u64();
+            left = 64;
+        }
+        s.push(ALPHA[(bits & 0xff) as usize % ALPHA.len()] as char);
+        bits >>= 8;
+        left -= 8;
+    }
+    s
+}
+
+/// Generate a random `From` header of the form `Name <local@domain.tld>`.
+///
+/// Both the display name and the address use a randomised character count so
+/// no two posts share an obvious fingerprint. Used whenever the user has not
+/// pinned a fixed `from` in the config or via `--from`.
+pub fn random_from() -> String {
+    let name = random_alpha(5 + (rand_u64() as usize % 8)); // 5..=12 chars
+    let local = random_alpha(6 + (rand_u64() as usize % 9)); // 6..=14 chars
+    let domain = random_alpha(5 + (rand_u64() as usize % 8)); // 5..=12 chars
+    let tld = ["com", "net", "org"][rand_u64() as usize % 3];
+    let mut display = name;
+    display[..1].make_ascii_uppercase();
+    format!("{display} <{local}@{domain}.{tld}>")
+}
+
 /// Build a default subject line for one part of a file.
 ///
 /// Single-part files use just the name; multi-part files append `(part/total)`.
@@ -113,6 +152,16 @@ mod tests {
     fn default_subject_handles_single_and_multi_part() {
         assert_eq!(default_subject("file.bin", 1, 1), "file.bin");
         assert_eq!(default_subject("file.bin", 2, 5), "file.bin (2/5)");
+    }
+
+    #[test]
+    fn random_from_is_address_shaped_and_varied() {
+        let a = random_from();
+        let b = random_from();
+        // `Name <local@domain.tld>` — must carry an `@` so the domain can be
+        // extracted for `Message-ID`s.
+        assert!(a.contains(" <") && a.ends_with('>') && a.contains('@'));
+        assert_ne!(a, b);
     }
 
     #[test]

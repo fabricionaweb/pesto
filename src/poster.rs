@@ -12,23 +12,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::article::{default_subject, generate_message_id, obfuscated_name, Article};
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::Connection;
-use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
-use crate::yenc;
-use crate::par2::encoder::{FileHasher, RecoveryEncoder, slice_checksum};
-use crate::par2::packet::{self, SliceChecksum};
+use crate::par2::encoder::{slice_checksum, FileHasher, RecoveryEncoder};
 use crate::par2::layout;
+use crate::par2::packet::{self, SliceChecksum};
+use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
+use crate::walk::InputFile;
+use crate::yenc;
 
-/// Maximum number of attempts to post a single segment before giving up.
-const MAX_POST_ATTEMPTS: u32 = 3;
-/// Pause between failed attempts.
-const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// Maximum memory to use for PAR2 recovery slices (in bytes).
 const MAX_PAR2_MEMORY: usize = 1_000_000_000; // 1 GB
 /// Target number of PAR2 input slices. Reed-Solomon encoding cost grows with
@@ -97,8 +94,9 @@ impl Shared {
 /// Post every file in `files` to the groups configured in `config`.
 ///
 /// This is the silent entry point; use [`post_files_with_progress`] to observe
-/// the run through a [`ProgressEvent`] channel.
-pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcome> {
+/// the run through a [`ProgressEvent`] channel. Build the [`InputFile`] list
+/// with [`crate::walk::expand_inputs`], which also expands directories.
+pub async fn post_files(config: &Config, files: &[InputFile]) -> Result<PostOutcome> {
     post_files_with_progress(config, files, None).await
 }
 
@@ -108,24 +106,23 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
 /// the terminal itself: rendering is entirely up to the channel's consumer.
 pub async fn post_files_with_progress(
     config: &Config,
-    files: &[PathBuf],
+    files: &[InputFile],
     events: Option<ProgressSender>,
 ) -> Result<PostOutcome> {
     configure_rayon();
 
     let mut metas = Vec::with_capacity(files.len());
-    for path in files {
+    for input in files {
+        let path = &input.path;
         let md = tokio::fs::metadata(path)
             .await
             .with_context(|| format!("reading metadata of `{}`", path.display()))?;
         if !md.is_file() {
             bail!("`{}` is not a regular file", path.display());
         }
-        let real_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("invalid file name: `{}`", path.display()))?
-            .to_string();
+        // `real_name` is the published name: a relative path like
+        // `season01/ep01.mkv` for files found inside a directory argument.
+        let real_name = input.name.clone();
         let (subject_name, yenc_name) = match config.obfuscate {
             ObfuscateMode::None => (real_name.clone(), real_name.clone()),
             ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
@@ -141,6 +138,22 @@ pub async fn post_files_with_progress(
             yenc_name,
             size: md.len(),
         }));
+    }
+
+    // PAR2 numbers its input blocks by walking the recovery-set files in
+    // File-ID order (par2 spec, Main packet). The producer feeds slices to the
+    // encoder in `metas` order, so for a multi-file set to be repairable
+    // `metas` must already be sorted by File ID. A single-file set is
+    // trivially ordered; with PAR2 disabled the order is irrelevant.
+    if config.par2 > 0 && metas.len() > 1 {
+        let mut keyed = Vec::with_capacity(metas.len());
+        for meta in &metas {
+            let md5_16k = file_md5_16k(&meta.path, meta.size).await?;
+            let file_id = packet::compute_file_id(&md5_16k, meta.size, &meta.real_name);
+            keyed.push((file_id, meta.clone()));
+        }
+        keyed.sort_by_key(|(file_id, _)| *file_id);
+        metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
     let mut initial_segments = 0;
@@ -317,6 +330,47 @@ fn feed_par2_slice(
     tokio::task::block_in_place(|| enc.add_slice(padded));
 }
 
+/// Base name for the PAR2 set's on-disk files. A published name may be a
+/// relative path (`season01/ep01.mkv`); the PAR2 index and volume files live
+/// at a single level, so they take the top-level component (the root folder,
+/// or the file's own name for a single-file upload) as their base.
+fn par2_base(name: &str) -> &str {
+    name.split('/').next().unwrap_or(name)
+}
+
+/// MD5 of a file's first 16 KiB — the PAR2 "16k hash" half of a File ID.
+/// Read in a tiny pre-pass so files can be ordered before the encode pass.
+async fn file_md5_16k(path: &std::path::Path, size: u64) -> Result<[u8; 16]> {
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("opening `{}`", path.display()))?;
+    let take = size.min(16 * 1024) as usize;
+    let mut buf = vec![0u8; take];
+    file.read_exact(&mut buf)
+        .await
+        .with_context(|| format!("reading `{}`", path.display()))?;
+    let mut hasher = FileHasher::new();
+    hasher.update(&buf);
+    Ok(hasher.finish().md5_16k)
+}
+
+/// Directory where `--par2-only` writes the recovery set.
+///
+/// File Description packets store each file's *relative* name, so `par2` must
+/// be run from the directory that contains the root folder. The published
+/// name has one path component per directory level; stripping that many
+/// components off the filesystem path lands exactly there. A loose file
+/// (single component) yields its parent directory, as before.
+fn par2_output_dir(meta: &FileMeta) -> PathBuf {
+    let depth = meta.real_name.split('/').count();
+    meta.path
+        .ancestors()
+        .nth(depth)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn domain_from(from: &str) -> String {
     if let Some(rest) = from.rsplit('@').next().filter(|_| from.contains('@')) {
         let domain = rest.trim_end_matches('>').trim();
@@ -438,13 +492,17 @@ async fn producer(
 
                 if pass_idx == 0 {
                     if let Some(tx) = &tx_opt {
-                        if tx.send(PostTask {
-                            meta: meta.clone(),
-                            part: i as u32 + 1,
-                            total: total_parts,
-                            offset,
-                            data: buf,
-                        }).await.is_err() {
+                        if tx
+                            .send(PostTask {
+                                meta: meta.clone(),
+                                part: i as u32 + 1,
+                                total: total_parts,
+                                offset,
+                                data: buf,
+                            })
+                            .await
+                            .is_err()
+                        {
                             return Ok(()); // channel closed
                         }
                     } else {
@@ -483,7 +541,8 @@ async fn producer(
 
                 for (idx, hasher) in par2_files.drain(..).enumerate() {
                     let fh = hasher.finish();
-                    let fid = packet::compute_file_id(&fh.md5_16k, fh.length, &metas[idx].real_name);
+                    let fid =
+                        packet::compute_file_id(&fh.md5_16k, fh.length, &metas[idx].real_name);
                     file_ids.push(fid);
                     hashes.push(fh);
                 }
@@ -491,27 +550,45 @@ async fn producer(
                 let main_b = packet::main_body(par2_slice_size as u64, &file_ids);
                 rsid = packet::recovery_set_id(&main_b);
                 let pkt_main = packet::serialize_packet(&rsid, &packet::TYPE_MAIN, &main_b);
-                let pkt_creator = packet::serialize_packet(&rsid, &packet::TYPE_CREATOR, &packet::creator_body("pesto"));
+                let pkt_creator = packet::serialize_packet(
+                    &rsid,
+                    &packet::TYPE_CREATOR,
+                    &packet::creator_body("pesto"),
+                );
 
                 base_packets.extend(pkt_main);
                 base_packets.extend(pkt_creator);
 
                 for (idx, fh) in hashes.iter().enumerate() {
                     let fid = &file_ids[idx];
-                    let pkt_file_desc = packet::serialize_packet(&rsid, &packet::TYPE_FILE_DESC, &packet::file_description_body(fid, &fh.md5_full, &fh.md5_16k, fh.length, &metas[idx].real_name));
-                    let pkt_ifsc = packet::serialize_packet(&rsid, &packet::TYPE_IFSC, &packet::ifsc_body(fid, &all_checksums[idx]));
+                    let pkt_file_desc = packet::serialize_packet(
+                        &rsid,
+                        &packet::TYPE_FILE_DESC,
+                        &packet::file_description_body(
+                            fid,
+                            &fh.md5_full,
+                            &fh.md5_16k,
+                            fh.length,
+                            &metas[idx].real_name,
+                        ),
+                    );
+                    let pkt_ifsc = packet::serialize_packet(
+                        &rsid,
+                        &packet::TYPE_IFSC,
+                        &packet::ifsc_body(fid, &all_checksums[idx]),
+                    );
                     base_packets.extend(pkt_file_desc);
                     base_packets.extend(pkt_ifsc);
                 }
 
                 if shared.config.par2_only {
-                    par2_dir = Some(metas[0].path.parent().unwrap_or(std::path::Path::new("")).to_path_buf());
+                    par2_dir = Some(par2_output_dir(&metas[0]));
                 } else {
                     par2_dir = Some(par2_temp_dir());
                     tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
                 }
 
-                let index_name = layout::index_name(&metas[0].real_name);
+                let index_name = layout::index_name(par2_base(&metas[0].real_name));
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
                 if let Some(tx) = &tx_opt {
@@ -521,17 +598,28 @@ async fn producer(
 
             let volumes = layout::plan_volumes(recovery_count as u32);
             for slice in recovery_slices {
-                let vol = volumes.iter().find(|v| slice.exponent >= v.first && slice.exponent < v.first + v.count).unwrap();
-                let vol_name = layout::volume_name(&metas[0].real_name, *vol);
+                let vol = volumes
+                    .iter()
+                    .find(|v| slice.exponent >= v.first && slice.exponent < v.first + v.count)
+                    .unwrap();
+                let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
                 let vol_path = par2_dir.as_ref().unwrap().join(&vol_name);
 
-                let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(&vol_path).await?;
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&vol_path)
+                    .await?;
 
                 if slice.exponent == vol.first {
                     file.write_all(&base_packets).await?;
                 }
 
-                let pkt = packet::serialize_packet(&rsid, &packet::TYPE_RECOVERY, &packet::recovery_body(slice.exponent, &slice.data));
+                let pkt = packet::serialize_packet(
+                    &rsid,
+                    &packet::TYPE_RECOVERY,
+                    &packet::recovery_body(slice.exponent, &slice.data),
+                );
                 file.write_all(&pkt).await?;
 
                 if slice.exponent == vol.first + vol.count - 1 {
@@ -542,7 +630,7 @@ async fn producer(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -583,13 +671,17 @@ async fn push_par2_file(
     for (i, (offset, len)) in segments.into_iter().enumerate() {
         let mut buf = vec![0u8; len];
         file.read_exact(&mut buf).await?;
-        if tx.send(PostTask {
-            meta: meta.clone(),
-            part: i as u32 + 1,
-            total,
-            offset,
-            data: buf,
-        }).await.is_err() {
+        if tx
+            .send(PostTask {
+                meta: meta.clone(),
+                part: i as u32 + 1,
+                total,
+                offset,
+                data: buf,
+            })
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -629,7 +721,7 @@ async fn worker(
                 offset: task.offset,
             },
             &task.data,
-            yenc::DEFAULT_LINE_LENGTH,
+            shared.config.line_length,
             None,
         );
         let message_id = generate_message_id(&shared.domain);
@@ -647,14 +739,16 @@ async fn worker(
         if shared.config.dry_run {
             posted = true;
         } else {
-            for attempt in 1..=MAX_POST_ATTEMPTS {
+            let max_attempts = shared.config.retries;
+            let backoff = Duration::from_secs(shared.config.retry_delay);
+            for attempt in 1..=max_attempts {
                 if conn.is_none() {
                     match connect_and_auth(&shared.config).await {
                         Ok(c) => conn = Some(c),
                         Err(e) => {
                             last_err = format!("connect: {e:#}");
-                            if attempt < MAX_POST_ATTEMPTS {
-                                tokio::time::sleep(RETRY_BACKOFF).await;
+                            if attempt < max_attempts {
+                                tokio::time::sleep(backoff).await;
                             }
                             continue;
                         }
@@ -669,8 +763,8 @@ async fn worker(
                     Err(e) => {
                         last_err = format!("{e:#}");
                         conn = None;
-                        if attempt < MAX_POST_ATTEMPTS {
-                            tokio::time::sleep(RETRY_BACKOFF).await;
+                        if attempt < max_attempts {
+                            tokio::time::sleep(backoff).await;
                         }
                     }
                 }

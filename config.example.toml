@@ -1,18 +1,59 @@
 # Example pesto configuration.
-# Copy to `config.toml` and adjust. Any field can be overridden by a CLI flag.
+#
+# Copy this file to your config directory so pesto loads it automatically:
+#
+#   $XDG_CONFIG_HOME/pesto/config.toml   (or ~/.config/pesto/config.toml)
+#
+# Or generate it interactively with `pesto --config`.
+#
+# Every field is optional and can be overridden by the matching CLI flag.
+# Commented-out fields show their built-in default.
 
 [server]
 host = "news.example.com"
-port = 563
-ssl = true
-connections = 10
+# port = 563          # NNTP port; 563 is TLS, 119 is plaintext. Default: 563.
+# ssl = true          # Connect over TLS. Default: true. (--no-ssl to disable.)
+# connections = 4     # Parallel NNTP connections — the main throughput lever.
+                      # Default: 4. Most providers allow 10–50.
+# retry_delay = 1     # Seconds to wait between failed post attempts. Default: 1.
 
 [auth]
+# Credentials for the NNTP server. Omit the whole section for open servers.
+# Never commit a real password to version control.
 username = "your_username"
 password = "your_password"
 
 [posting]
-from = "poster <poster@example.com>"
+# from — the `From` header on every article.
+# When omitted, pesto posts under a freshly generated random identity, with a
+# random name and a random number of characters, on every run. Set a fixed
+# value only if you specifically need one.
+# from = "poster <poster@example.com>"
+
+# Newsgroups to post to. At least one is required (unless --par2-only).
 groups = ["alt.binaries.test"]
-article_size = 768000   # target size of each segment, in bytes
-obfuscate = "none"      # obfuscation mode: "none", "subject" or "full"
+
+# article_size — target size of each posted segment, in bytes. Default: 768000.
+# article_size = 768000
+
+# line_length — yEnc encoded line length, in characters. Default: 128.
+# line_length = 128
+
+# retries — post attempts per segment before it is marked failed. Default: 3.
+# retries = 3
+
+# obfuscate — how much of each post to hide. Default: "none".
+#   "none"    real file name in the subject and the yEnc header
+#   "subject" random subject; yEnc header keeps the real name
+#   "full"    random subject and random yEnc name (recover via the .nzb)
+# obfuscate = "none"
+
+# par2 — percentage of PAR2 recovery data to generate. 0 disables it.
+# Default: 10.
+# par2 = 10
+
+[output]
+# nzb — default path for the generated .nzb file. Overridden by --out.
+# When unset, an .nzb is written only if --out is given — except for a
+# directory upload, which defaults to a .nzb named after the root folder.
+# nzb = "upload.nzb"

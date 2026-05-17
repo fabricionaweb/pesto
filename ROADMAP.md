@@ -105,7 +105,62 @@ targets ~1000 input slices to keep the encode affordable for large files.
 - [x] `--par2-only` flag: write parity files next to the source, no posting
 - [x] `--dry-run` flag: process files without touching the network
 
-## Phase 8 — `upapasta` integration
+## Phase 8 — Configuration & UX ✅
+
+- [x] Default config path (`$XDG_CONFIG_HOME/pesto/config.toml`), loaded
+      automatically when `--config` is omitted
+- [x] Random `from` identity by default (random name and length); fixed value
+      only when the user pins one
+- [x] Interactive setup wizard (`pesto --config` with no value)
+- [x] Orientation screen when `pesto` is run with no arguments
+- [x] Expanded `--help` and `config.example.toml`; new options
+      `line_length`, `retries`, `retry_delay`, `[output].nzb`
+
+## Phase 9 — Directory uploads ✅
+
+Accept directories as arguments, not just individual files. A directory may be
+a TV-show season, or any folder with nested subfolders. The whole tree is
+posted as one logical upload, and PAR2 must let a downloader rebuild the
+original directory layout — not just a flat list of files.
+
+### 9a — Directory traversal ✅
+
+- [x] Accept directory paths as `FILE` arguments alongside plain files
+- [x] Recursive walk producing the file list, with the relative path of each
+      file preserved (root folder name kept as the top-level component)
+- [x] Deterministic ordering (sorted) so runs and PAR2 sets are reproducible
+- [x] Decide handling of empty directories, symlinks and hidden/dot files;
+      document the chosen behaviour (see `src/walk.rs` module docs)
+- [x] Reject or warn on unreadable entries with an actionable message
+
+### 9b — Structure-preserving PAR2 and `.nzb` ✅
+
+- [x] Store the relative path (with `/` separators) in the PAR2 File
+      Description packets so `par2` repair restores the directory tree
+- [x] Carry the same relative path into the `.nzb` `<file name>` attribute
+- [x] One PAR2 recovery set covering the entire directory, not per-file
+- [x] Verify with `par2cmdline` that a repair recreates nested subfolders
+- [x] Fix latent multi-file bug: PAR2 numbers input blocks in File-ID order,
+      so the encoder must process files sorted by File ID, not by name
+- [x] `--par2-only` writes the recovery set beside the root folder, so the
+      stored relative names resolve correctly
+
+### 9c — Obfuscation for directories ✅
+
+- [x] `--obfuscate` randomises subjects and yEnc names across the whole tree
+- [x] Real relative paths still preserved in PAR2 and `.nzb` so the structure
+      is recoverable despite obfuscated article names
+- [x] Tests for an obfuscated multi-folder upload round-trip
+
+### 9d — UX and naming ✅
+
+- [x] Use the root folder name as the default `.nzb` name; the subject base
+      is the file's relative path, which already starts with the root folder
+- [x] Progress panel reports total files/bytes across the whole tree
+- [x] Aggregate counts (files, subfolders, total size) in the summary output
+- [x] `--help`, `README` and `config.example.toml` updated for folder uploads
+
+## Phase 10 — `upapasta` integration
 
 - [ ] Stabilize the public API of `lib.rs`
 - [ ] Document integration points

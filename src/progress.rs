@@ -65,7 +65,11 @@ pub enum ProgressEvent {
     SegmentDone { file: String, bytes: u64, ok: bool },
     /// Extra work was appended to the queue — the PAR2 files, which only
     /// exist once the data pass has computed parity.
-    QueueExtended { file: String, segments: u64, bytes: u64 },
+    QueueExtended {
+        file: String,
+        segments: u64,
+        bytes: u64,
+    },
     /// A short human-readable status note (empty string clears it).
     Status { text: String },
     /// A segment failed permanently after exhausting its retries.

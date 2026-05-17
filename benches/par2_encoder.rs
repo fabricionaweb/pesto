@@ -80,9 +80,7 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(1);
 
-    println!(
-        "PAR2 encoder benchmark — slice {SLICE_SIZE} B — {simd} path — {threads} thread(s)\n"
-    );
+    println!("PAR2 encoder benchmark — slice {SLICE_SIZE} B — {simd} path — {threads} thread(s)\n");
 
     bench("64 MiB @ 10%", 64, 10);
     bench("256 MiB @ 10%", 256, 10);

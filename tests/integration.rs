@@ -93,15 +93,20 @@ async fn posts_every_segment_to_a_mock_server() {
         from: "tester <t@pesto.test>".to_string(),
         groups: vec!["alt.binaries.test".to_string()],
         article_size: 100,
+        line_length: 128,
+        retries: 3,
+        retry_delay: 1,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 0,
         par2_only: false,
     };
 
-    let outcome = post_files(&config, std::slice::from_ref(&path))
-        .await
-        .unwrap();
+    let inputs = vec![pesto::walk::InputFile {
+        path: path.clone(),
+        name: "pesto_it.bin".to_string(),
+    }];
+    let outcome = post_files(&config, &inputs).await.unwrap();
     std::fs::remove_file(&path).ok();
 
     assert!(
