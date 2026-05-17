@@ -219,10 +219,19 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", default_value = "terminal")]
     output_format: String,
 
-    /// Accepted for backward compatibility; pesto does not generate .nfo files.
-    /// Pass the .nfo as a regular input file instead.
-    #[arg(long, hide = true)]
-    no_nfo: bool,
+    /// Generate a `.nfo` file next to the `.nzb` after posting. The file
+    /// contains `mediainfo` output for the first media file, or a directory
+    /// listing when no video file is found [config: output.nfo = true].
+    #[arg(long)]
+    nfo: bool,
+
+    /// Shell command to execute after each successful upload. The command
+    /// receives upload details via environment variables:
+    /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
+    /// `PESTO_GROUP`, `PESTO_PASSWORD`, `PESTO_SERVER`
+    /// [config: output.post_hook].
+    #[arg(long, value_name = "CMD")]
+    post_hook: Option<String>,
 
     /// Skip writing to the shared upload history
     /// (~/.config/upapasta/history.jsonl) for this run
@@ -333,6 +342,8 @@ impl Cli {
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
+            post_hook: self.post_hook.clone(),
+            nfo: if self.nfo { Some(true) } else { None },
         }
     }
 }
@@ -656,6 +667,56 @@ async fn run_single_upload(
             ok: !had_failures,
         })
         .await;
+    }
+
+    // Generate .nfo and run post-upload hook when the upload succeeded.
+    let upload_ok = !outcome.cancelled && outcome.failures.is_empty();
+    if upload_ok && !config.par2_only && !config.dry_run {
+        // Derive the .nfo path next to the .nzb (or next to the source).
+        let nfo_path: Option<PathBuf> = if config.nfo {
+            let base = out
+                .as_ref()
+                .map(|p| p.with_extension("nfo"))
+                .or_else(|| {
+                    entry_paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .map(|d| d.join(format!("{entry_label}.nfo")))
+                });
+            if let Some(ref nfo_out) = base {
+                match pesto::nfo::generate(entry_paths) {
+                    Some(content) => match pesto::nfo::write(nfo_out, &content) {
+                        Ok(()) => {
+                            println!("wrote nfo:  {}", nfo_out.display());
+                            Some(nfo_out.clone())
+                        }
+                        Err(e) => {
+                            eprintln!("nfo write failed: {e}");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Run the post-upload hook.
+        if let Some(cmd) = &config.post_hook {
+            run_post_hook(PostHookArgs {
+                cmd,
+                nzb_path: out.as_deref(),
+                nfo_path: nfo_path.as_deref(),
+                name: entry_label,
+                total_bytes,
+                group: config.groups.first().map(String::as_str),
+                password: effective_password.as_deref(),
+                server: &config.host,
+            });
+        }
     }
 
     // Cleanup temp dirs.
@@ -1135,6 +1196,55 @@ fn print_welcome() {
             "Set $HOME or $XDG_CONFIG_HOME so pesto can locate a config file,\n\
              or pass every setting as a flag (see `pesto --help`)."
         ),
+    }
+}
+
+struct PostHookArgs<'a> {
+    cmd: &'a str,
+    nzb_path: Option<&'a std::path::Path>,
+    nfo_path: Option<&'a std::path::Path>,
+    name: &'a str,
+    total_bytes: u64,
+    group: Option<&'a str>,
+    password: Option<&'a str>,
+    server: &'a str,
+}
+
+/// Execute the post-upload hook command with upload details as environment variables.
+///
+/// The hook is run via the OS shell (`sh -c` on Unix, `cmd /c` on Windows) so
+/// any interpreter (bash, Python, PowerShell script) works as long as the OS
+/// can launch it. Errors are logged but never abort the caller.
+fn run_post_hook(args: PostHookArgs<'_>) {
+    let PostHookArgs { cmd, nzb_path, nfo_path, name, total_bytes, group, password, server } = args;
+    #[cfg(unix)]
+    let mut child = std::process::Command::new("sh");
+    #[cfg(unix)]
+    child.args(["-c", cmd]);
+
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd");
+    #[cfg(windows)]
+    child.args(["/c", cmd]);
+
+    child.env("PESTO_NAME", name);
+    child.env("PESTO_BYTES", total_bytes.to_string());
+    child.env("PESTO_SERVER", server);
+    child.env("PESTO_GROUP", group.unwrap_or(""));
+    child.env("PESTO_PASSWORD", password.unwrap_or(""));
+    child.env(
+        "PESTO_NZB",
+        nzb_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+    );
+    child.env(
+        "PESTO_NFO",
+        nfo_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+    );
+
+    match child.status() {
+        Ok(s) if s.success() => println!("post-hook exited ok"),
+        Ok(s) => eprintln!("post-hook exited with status {s}"),
+        Err(e) => eprintln!("post-hook failed to start: {e}"),
     }
 }
 

@@ -357,16 +357,10 @@ the orchestrator.
       (`POST /api?t=addnzb&apikey=KEY&cat=CATEGORY` with multipart `nzbfile`)
 - [x] `--no-upload` flag to suppress the upload for a single run
 
-### 15c — `.nfo` generation ~~(removed)~~
+### 15c — `.nfo` generation
 
-`.nfo` generation was removed from `pesto`. The correct practice is for the
-`.nfo` file to be produced externally (e.g. by `upapasta`) and passed as a
-regular input file. `pesto` treats it like any other file and posts it
-alongside the rest. There is no special `.nfo` handling in the poster.
-
-> This phase is deliberately placed *after* `upapasta` integration is complete.
-> While `upapasta` still wraps `pesto`, metadata enrichment stays in the Python
-> layer. Only implement here once `pesto` is used standalone for rich uploads.
+Moved to **Phase 18a**. NFO generation is now implemented natively in pesto
+(`src/nfo.rs`) and exposed via `--nfo` / `output.nfo`.
 
 ## Phase 16 — Observability & UX
 
@@ -468,3 +462,40 @@ cipher.
 ### 17b — Configurable `Message-ID` domain
 
 Already tracked under Phase 14e.
+
+## Phase 18 — Post-upload hooks & NFO generation ✅
+
+### 18a — NFO file generation ✅
+
+Generates a `.nfo` text file that describes the uploaded content:
+
+- [x] `--nfo` flag and `output.nfo = true` config key
+- [x] Runs `mediainfo` on the first video file found (lowest-sorted) when the
+      input contains recognisable video extensions (mkv, mp4, avi, ts, …)
+- [x] For TV season directories: `mediainfo` output for the first episode
+- [x] Falls back to a recursive directory/file listing (with sizes) when no
+      video file is present or `mediainfo` is not installed
+- [x] `.nfo` is written alongside the `.nzb` (same directory, same stem)
+- [x] Path is exposed as `PESTO_NFO` to post-upload hook scripts
+- [x] `src/nfo.rs` module; no mandatory external dependency — `mediainfo` is
+      optional and failure is handled gracefully
+
+### 18b — Post-upload hook ✅
+
+Executes a user-supplied command after each successful upload so external
+scripts (Python, Bash, PowerShell, …) can react without polling.
+
+- [x] `--post-hook <CMD>` flag and `output.post_hook` config key
+- [x] Runs via the OS shell (`sh -c` on Unix, `cmd /c` on Windows) so any
+      interpreter is supported without special handling in pesto
+- [x] Environment variables set before the hook runs:
+  - `PESTO_NZB` — absolute path to the generated `.nzb` file
+  - `PESTO_NFO` — absolute path to the `.nfo` file (empty when not generated)
+  - `PESTO_NAME` — original release name / entry label
+  - `PESTO_BYTES` — total bytes posted (decimal string)
+  - `PESTO_GROUP` — first Usenet newsgroup
+  - `PESTO_PASSWORD` — archive password (empty when none)
+  - `PESTO_SERVER` — NNTP server hostname
+- [x] Hook exit status is logged; a non-zero exit never aborts or fails the
+      upload — the post already succeeded at that point
+- [x] Hook is suppressed for `--par2-only`, `--dry-run`, and failed uploads
