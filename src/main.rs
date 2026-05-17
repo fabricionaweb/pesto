@@ -534,13 +534,9 @@ async fn run_single_upload(
     let resume_path: Option<PathBuf> = nzb_base_path
         .as_ref()
         .map(|p| p.with_extension("pesto-state"));
-    // Output NZB path gets a version suffix when the base already exists.
-    let nzb_out_path: Option<PathBuf> = if let Some(p) = &nzb_base_path {
-        let base = p.with_extension("");
-        Some(next_free_versioned_path(&base, "nzb").await)
-    } else {
-        None
-    };
+    // nzb_out_path starts as the base path; it is versioned (v2, v3, …) lazily
+    // at write time so no filesystem access is needed before posting starts.
+    let nzb_out_path: Option<PathBuf> = nzb_base_path.clone();
 
     let outcome = pesto::poster::post_files_with_progress(
         config,
@@ -579,7 +575,14 @@ async fn run_single_upload(
     }
 
     // Write NZB.
-    let out = nzb_out_path.clone();
+    // Version the output path here (after posting) so no filesystem access
+    // is needed before the upload starts.
+    let out: Option<PathBuf> = if let Some(base) = nzb_out_path {
+        let stem = base.with_extension("");
+        Some(next_free_versioned_path(&stem, "nzb").await)
+    } else {
+        None
+    };
 
     let nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
