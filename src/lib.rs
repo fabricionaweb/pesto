@@ -3,6 +3,26 @@
 //! `pesto` is a fast, lean Usenet poster: it yEnc-encodes files, posts the
 //! resulting articles over NNTP and emits an `.nzb` file. See ROADMAP.md for
 //! the development plan.
+//!
+//! # Embedding
+//!
+//! The minimal surface for embedding callers is [`post`]: pass a resolved
+//! [`config::Config`] and the list of [`poster::InputFile`]s; get back a
+//! [`poster::PostOutcome`]. Progress events are delivered on the
+//! [`progress::ProgressReceiver`] returned alongside the outcome; drop it to
+//! silence reporting.
+//!
+//! ```no_run
+//! # async fn example() -> anyhow::Result<()> {
+//! use pesto::{config::Config, poster::InputFile};
+//!
+//! let config = Config::default();
+//! let files = vec![InputFile { path: "movie.mkv".into(), real_name: None }];
+//! let (outcome, _events) = pesto::post(config, files).await?;
+//! println!("posted {} segments", outcome.segments.len());
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod article;
 pub mod compress;
@@ -17,3 +37,16 @@ pub mod progress;
 pub mod resume;
 pub mod walk;
 pub mod yenc;
+
+/// Post `files` to Usenet using `config` and return the outcome together with
+/// a [`progress::ProgressReceiver`] the caller can drain for live updates.
+///
+/// Dropping the receiver is safe: the poster continues unimpeded.
+pub async fn post(
+    config: config::Config,
+    files: Vec<walk::InputFile>,
+) -> anyhow::Result<(poster::PostOutcome, progress::ProgressReceiver)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = poster::post_files_with_progress(&config, &files, Some(tx), None).await?;
+    Ok((outcome, rx))
+}

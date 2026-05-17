@@ -103,6 +103,140 @@ pub fn spawn_terminal_renderer() -> (ProgressSender, JoinHandle<()>) {
     (tx, handle)
 }
 
+/// Spawn a newline-delimited JSON emitter for machine-readable consumers
+/// (e.g. `upapasta`).
+///
+/// Each [`ProgressEvent`] is translated to one JSON object printed to stdout.
+/// After the emitter finishes, the caller should print a
+/// `{"type":"nzb_written","path":"..."}` event itself once the NZB file has
+/// been written. This decouples path resolution from the progress stream.
+///
+/// Returns the [`ProgressSender`] to hand to the poster and a [`JoinHandle`]
+/// the caller must await after posting returns.
+pub fn spawn_json_emitter() -> (ProgressSender, JoinHandle<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = tokio::spawn(json_emit_loop(rx));
+    (tx, handle)
+}
+
+async fn json_emit_loop(mut rx: ProgressReceiver) {
+    let stdout = std::io::stdout();
+    let mut total_segments: u64 = 0;
+    let mut done_segments: u64 = 0;
+    let mut done_bytes: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut failures: u64 = 0;
+
+    loop {
+        match rx.recv().await {
+            None | Some(ProgressEvent::Finished) => {
+                let pct = if total_segments > 0 {
+                    (done_segments as f64 / total_segments as f64 * 100.0).min(100.0)
+                } else {
+                    100.0
+                };
+                let ok = failures == 0;
+                let mut out = stdout.lock();
+                let _ = writeln!(
+                    out,
+                    r#"{{"type":"finished","segments":{done_segments},"failures":{failures},"progress_pct":{pct:.1},"ok":{ok}}}"#
+                );
+                break;
+            }
+            Some(ev) => {
+                let mut out = stdout.lock();
+                match ev {
+                    ProgressEvent::Started {
+                        files,
+                        connections,
+                        target,
+                        ..
+                    } => {
+                        let target_json = target
+                            .as_deref()
+                            .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+                            .unwrap_or_else(|| "null".to_string());
+                        for f in &files {
+                            total_segments += f.segments;
+                            total_bytes += f.bytes;
+                        }
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"started","total_files":{nf},"total_bytes":{total_bytes},"total_segments":{total_segments},"connections":{connections},"target":{target_json}}}"#,
+                            nf = files.len(),
+                        );
+                    }
+                    ProgressEvent::SegmentDone { file, bytes, ok } => {
+                        done_segments += 1;
+                        done_bytes += bytes;
+                        if !ok {
+                            failures += 1;
+                        }
+                        let pct = if total_segments > 0 {
+                            (done_segments as f64 / total_segments as f64 * 100.0).min(100.0)
+                        } else {
+                            0.0
+                        };
+                        let file_esc = file.replace('"', "\\\"");
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"segment_done","file":"{file_esc}","bytes":{bytes},"ok":{ok},"done_segments":{done_segments},"total_segments":{total_segments},"done_bytes":{done_bytes},"total_bytes":{total_bytes},"progress_pct":{pct:.1}}}"#
+                        );
+                    }
+                    ProgressEvent::QueueExtended { file, segments, bytes } => {
+                        total_segments += segments;
+                        total_bytes += bytes;
+                        let file_esc = file.replace('"', "\\\"");
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"queue_extended","file":"{file_esc}","segments":{segments},"bytes":{bytes},"total_segments":{total_segments},"total_bytes":{total_bytes}}}"#
+                        );
+                    }
+                    ProgressEvent::Status { text } => {
+                        let text_esc = text.replace('\\', "\\\\").replace('"', "\\\"");
+                        let _ = writeln!(out, r#"{{"type":"status","text":"{text_esc}"}}"#);
+                    }
+                    ProgressEvent::Failed { description } => {
+                        let desc_esc = description.replace('\\', "\\\\").replace('"', "\\\"");
+                        let _ = writeln!(out, r#"{{"type":"failed","description":"{desc_esc}"}}"#);
+                    }
+                    ProgressEvent::Interrupted => {
+                        let _ = writeln!(out, r#"{{"type":"interrupted"}}"#);
+                    }
+                    ProgressEvent::CompressStarted { total_bytes: tb } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"compress_started","total_bytes":{tb}}}"#
+                        );
+                    }
+                    ProgressEvent::CompressProgress { bytes_written } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"compress_progress","bytes_written":{bytes_written}}}"#
+                        );
+                    }
+                    ProgressEvent::CompressDone => {
+                        let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
+                    }
+                    ProgressEvent::Par2WriteStarted { total } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"par2_write_started","total":{total}}}"#
+                        );
+                    }
+                    ProgressEvent::Par2SliceWritten => {
+                        let _ = writeln!(out, r#"{{"type":"par2_slice_written"}}"#);
+                    }
+                    // Connection events are noisy and not useful to consumers.
+                    ProgressEvent::ConnectionBusy { .. }
+                    | ProgressEvent::ConnectionIdle { .. }
+                    | ProgressEvent::Finished => {}
+                }
+            }
+        }
+    }
+}
+
 /// Width, in characters, of the panel box interior.
 const BODY_W: usize = 44;
 /// Above this connection count the per-connection grid is replaced by a
