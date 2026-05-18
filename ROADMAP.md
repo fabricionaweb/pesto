@@ -624,17 +624,16 @@ potentially misleading value.
 - [x] When CV ≥ 0.3: append a `~` instability marker (`ETA ~2:30–4:00`)
 - [x] No new dependencies; pure arithmetic on existing ring-buffer
 
-### 21e — Directory tree preview (priority 5)
+### 21e — Directory tree preview ✅ (priority 5)
 
 Print a clean `tree`-style breakdown of the payload in the pre-flight summary
 before any encoding/uploading starts.
 
-- [ ] `print_tree(files: &[FileEntry])` in `progress.rs` or a dedicated
-      `tree.rs` renders the file list as a hierarchical tree by splitting
-      paths on `/`
-- [ ] Shows per-file size on the right column, total at the bottom
-- [ ] Only emitted when stderr is a TTY; suppressed in JSON / quiet mode
-- [ ] Called from `main.rs` after the file list is resolved, before
+- [x] `print_tree(files: &[InputFile])` in `progress.rs` renders the file
+      list as a hierarchical tree by splitting names on `/`
+- [x] Shows per-file size on the right column, total at the bottom
+- [x] Only emitted when stderr is a TTY; suppressed in JSON / quiet mode
+- [x] Called from `main.rs` after the file list is resolved, before
       `spawn_terminal_renderer`
 
 ### 21f — Quiet / minimal mode ✅ (priority 6)
@@ -647,7 +646,7 @@ Single-line mode for tmux/screen users who want minimal terminal noise.
 - [x] On completion: replaces the spinner line with a single summary line
 - [x] No box-drawing characters; zero ANSI colour (so it degrades cleanly in
       logging pipelines even if accidentally used there)
-- [ ] `--quiet` suppresses the directory tree preview (21e) and sparklines (21c)
+- [x] `--quiet` suppresses the directory tree preview (21e) and sparklines (21c)
 
 ### 21g — Audible bell on completion ✅ (priority 7)
 

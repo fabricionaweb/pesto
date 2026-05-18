@@ -4,7 +4,7 @@
 //! and writes an `.nzb` file describing the result.
 
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -403,6 +403,11 @@ async fn run_single_upload(
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
+
+    if !params.json_mode && !params.renderer_opts.quiet && std::io::stderr().is_terminal() {
+        pesto::progress::print_tree(&inputs);
+    }
+
     let (progress_tx, renderer) = if params.json_mode {
         pesto::progress::spawn_json_emitter()
     } else {
