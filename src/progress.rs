@@ -1213,6 +1213,91 @@ fn format_duration(secs: f64) -> String {
     }
 }
 
+/// Print a `tree`-style breakdown of the upload payload to stderr.
+///
+/// Called after `expand_inputs` resolves the file list, before the terminal
+/// renderer starts.  Only emitted when stderr is a TTY and quiet mode is off.
+///
+/// Each `name` in `files` is a `/`-separated relative path
+/// (e.g. `season01/ep01.mkv`).  We reconstruct the directory hierarchy from
+/// those strings alone — no filesystem access needed.
+pub fn print_tree(files: &[crate::walk::InputFile]) {
+    use std::collections::BTreeMap;
+
+    if files.is_empty() {
+        return;
+    }
+
+    // Split each name into (directory_components, filename, size).
+    // We bucket by the first component so single-file uploads look clean.
+    struct Leaf {
+        filename: String,
+        size: u64,
+    }
+    // tree: directory path (joined by "/") → leaves sorted by filename
+    let mut tree: BTreeMap<String, Vec<Leaf>> = BTreeMap::new();
+    let mut total_bytes: u64 = 0;
+
+    for f in files {
+        let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
+        total_bytes += size;
+        let parts: Vec<&str> = f.name.splitn(2, '/').collect();
+        let (dir, filename) = if parts.len() == 2 {
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (String::new(), f.name.clone())
+        };
+        tree.entry(dir).or_default().push(Leaf { filename, size });
+    }
+
+    let format_size = |bytes: u64| -> String {
+        if bytes >= 1 << 30 {
+            format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
+        } else if bytes >= 1 << 20 {
+            format!("{:.1} MiB", bytes as f64 / (1u64 << 20) as f64)
+        } else if bytes >= 1 << 10 {
+            format!("{:.1} KiB", bytes as f64 / (1u64 << 10) as f64)
+        } else {
+            format!("{bytes} B")
+        }
+    };
+
+    let dirs: Vec<_> = tree.keys().cloned().collect();
+    let dir_count = dirs.len();
+
+    for (di, dir) in dirs.iter().enumerate() {
+        let leaves = &tree[dir];
+        let is_last_dir = di == dir_count - 1;
+        let dir_connector = if is_last_dir { "└──" } else { "├──" };
+
+        if dir.is_empty() {
+            // Files at top level — print them directly
+            for (li, leaf) in leaves.iter().enumerate() {
+                let is_last = li == leaves.len() - 1;
+                let conn = if is_last { "└──" } else { "├──" };
+                eprintln!("{conn} {} ({})", leaf.filename, format_size(leaf.size));
+            }
+        } else {
+            eprintln!("{dir_connector} {dir}/");
+            let prefix = if is_last_dir { "    " } else { "│   " };
+            for (li, leaf) in leaves.iter().enumerate() {
+                let is_last = li == leaves.len() - 1;
+                let conn = if is_last { "└──" } else { "├──" };
+                eprintln!("{prefix}{conn} {} ({})", leaf.filename, format_size(leaf.size));
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "  {} file{} · {}",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        format_size(total_bytes)
+    );
+    eprintln!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
