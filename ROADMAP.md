@@ -732,22 +732,22 @@ Implemented flags missing from the reference table:
 - [x] Note that `par2cmdline` is not required at runtime (pesto has its own
       implementation)
 
-### 22d — Badges and minimum Rust version ⬜
+### 22d — Badges and minimum Rust version ✅
 
-- [ ] Add CI status, crates.io version, and license badges to the top of README
-- [ ] Set `rust-version` in `Cargo.toml` to the minimum supported version
-- [ ] Mention the minimum Rust version in the README Build section
+- [x] Add CI status, crates.io version, and license badges to the top of README
+- [x] Set `rust-version = "1.75"` in `Cargo.toml`
+- [x] Mention the minimum Rust version in the README Build section
 
-### 22e — Installing section (binaries + crates.io) ⬜
+### 22e — Installing section (binaries + crates.io) ✅
 
+- [x] Document downloading a pre-built binary from GitHub Releases
+- [x] Note how to add the binary to `PATH` on Linux and Windows
 - [ ] Add `cargo install pesto` once published to crates.io
-- [ ] Document downloading a pre-built binary from GitHub Releases
-- [ ] Note how to add the binary to `PATH` on Linux, macOS, and Windows
 
-### 22f — CHANGELOG.md ⬜
+### 22f — CHANGELOG.md ✅
 
-- [ ] Create `CHANGELOG.md` covering v0.1.0 → v0.2.4 with highlights per version
-- [ ] Follow Keep a Changelog format
+- [x] Create `CHANGELOG.md` covering v0.1.0 → v0.2.4 with highlights per version
+- [x] Follow Keep a Changelog format
 
 ### 22g — Document all JSON event types ⬜
 

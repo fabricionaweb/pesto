@@ -2,6 +2,10 @@
 
 **Fast, lean Usenet poster written in Rust.**
 
+[![CI](https://github.com/franzopl/pesto/actions/workflows/ci.yml/badge.svg)](https://github.com/franzopl/pesto/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+
 yEnc-encodes files, posts them over parallel NNTP connections, generates a `.nzb`,
 and stays out of your way. Inspired by [`nyuu`](https://github.com/animetosho/Nyuu),
 with a deliberately minimal scope: just the essentials, executed extremely fast.
@@ -10,7 +14,8 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 
 ## Contents
 
-- [Build](#build)
+- [Installing](#installing)
+- [Build from source](#build-from-source)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Basic usage](#basic-usage)
@@ -29,9 +34,29 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 
 ---
 
-## Build
+## Installing
 
-Requires the Rust toolchain — install once from <https://rustup.rs>.
+### Pre-built binary (recommended)
+
+Download the latest binary for your platform from the
+[GitHub Releases](https://github.com/franzopl/pesto/releases) page:
+
+| Platform | File |
+|----------|------|
+| Linux x86-64 (glibc) | `pesto-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64 (musl / Alpine) | `pesto-x86_64-unknown-linux-musl.tar.gz` |
+| Windows x86-64 | `pesto-x86_64-pc-windows-msvc.zip` |
+
+Extract the archive and copy the binary to a directory on your `PATH`
+(e.g. `/usr/local/bin` on Linux/macOS, `C:\Windows\System32` on Windows).
+
+### Build from source
+
+---
+
+## Build from source
+
+Requires Rust **1.75 or newer** — install or update via <https://rustup.rs>.
 
 ```bash
 cargo build --release
