@@ -44,7 +44,7 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
         encoder.add_slice(padded);
     }
 
-    let recovery_slices = encoder.finish();
+    let (recovery_slices, _) = encoder.finish();
 
     // 3. Packets
     let file_id = compute_file_id(&hashes.md5_16k, hashes.length, file_name);
@@ -95,20 +95,27 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
     }
 
     // Verify using par2cmdline
-    let status = Command::new("par2")
+    let result = Command::new("par2")
         .arg("verify")
         .arg("-q")
         .arg(&index_path)
         .current_dir(&dir)
-        .status();
+        .output();
 
-    // Skip the test if `par2` is not installed or errors starting
-    if let Ok(st) = status {
-        assert!(st.success(), "par2cmdline verify failed on pristine files");
-    } else {
-        println!("par2cmdline not found, skipping validation test");
-        return;
-    }
+    // Skip the test if `par2` is not installed or could not be executed.
+    // Exit code 127 means "command not found" (set by the shell / exec failure).
+    let st = match result {
+        Err(_) => {
+            println!("par2cmdline not found, skipping validation test");
+            return;
+        }
+        Ok(out) if out.status.code() == Some(127) => {
+            println!("par2cmdline not found (exit 127), skipping validation test");
+            return;
+        }
+        Ok(out) => out.status,
+    };
+    assert!(st.success(), "par2cmdline verify failed on pristine files");
 
     // Corrupt the original file
     let mut corrupted = original_data.clone();

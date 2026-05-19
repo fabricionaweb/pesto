@@ -871,7 +871,7 @@ and enables the same 4-nibble shuffle algorithm.
 - [x] Implement `flush_neon()` using `vqtbl1q_u8` for `target_arch = "aarch64"`
 - [x] Mirror the 32 KiB cache-blocking strategy from the x86 paths
 - [x] Add `#[cfg(target_arch = "aarch64")]` dispatch alongside the x86 chain
-- [ ] Verify correctness with the existing Reed-Solomon unit tests on an ARM target
+- [x] Verify correctness with the existing Reed-Solomon unit tests on an ARM target
 
 ### 24d — XOR bit-dependency method (x86, advanced)
 

@@ -101,17 +101,23 @@ async fn par2_only_directory_repair_recreates_tree() {
     );
 
     // The rest needs par2cmdline; skip cleanly when it is not installed.
-    match Command::new("par2")
+    // Exit code 127 means the binary was not found by the kernel.
+    let par2_verify = Command::new("par2")
         .args(["verify", "-q", "Show.par2"])
         .current_dir(&root)
-        .status()
-    {
-        Ok(status) => assert!(status.success(), "par2 verify failed on the pristine tree"),
+        .output();
+    match par2_verify {
         Err(_) => {
             eprintln!("par2cmdline not found, skipping repair check");
             std::fs::remove_dir_all(&root).ok();
             return;
         }
+        Ok(out) if out.status.code() == Some(127) => {
+            eprintln!("par2cmdline not found (exit 127), skipping repair check");
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        Ok(out) => assert!(out.status.success(), "par2 verify failed on the pristine tree"),
     }
 
     // Delete the whole nested subfolder, then repair from the PAR2 set.
