@@ -209,6 +209,11 @@ pub struct PostingSection {
     pub check_delay: Option<u64>,
     /// Number of STAT attempts per article during post-check. Default: 2.
     pub check_retries: Option<u32>,
+    /// Maximum RAM for PAR2 recovery buffers as a human-readable string,
+    /// e.g. `"512 MiB"`. When the total buffer size would exceed this limit
+    /// the encoder splits recovery blocks into multiple passes, re-reading
+    /// the input files once per pass. Default: `"1 GiB"`.
+    pub par2_memory_limit: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -385,6 +390,9 @@ pub struct Config {
     pub dry_run: bool,
     /// Percentage of PAR2 recovery data to generate (0 to disable).
     pub par2: u8,
+    /// Maximum RAM for PAR2 recovery buffers in bytes. Multi-pass kicks in
+    /// when `recovery_count × slice_size` would exceed this limit.
+    pub par2_memory_limit: usize,
     /// Only generate PAR2 files without uploading them.
     pub par2_only: bool,
     /// Confirm each posted article with `STAT` and repost on failure.
@@ -590,6 +598,11 @@ impl Config {
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
+            par2_memory_limit: if let Some(s) = file.posting.par2_memory_limit {
+                parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize
+            } else {
+                1_000_000_000 // 1 GiB default
+            },
             par2_only,
             verify: cli.verify.or(file.posting.verify).unwrap_or(false),
             resume: cli

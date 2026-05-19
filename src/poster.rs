@@ -29,14 +29,79 @@ use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
 
-/// Maximum memory to use for PAR2 recovery slices (in bytes).
-const MAX_PAR2_MEMORY: usize = 1_000_000_000; // 1 GB
 /// Target number of PAR2 input slices. Reed-Solomon encoding cost grows with
 /// `file_size² / par2_slice_size`, so tying the PAR2 slice to the (small)
 /// article size makes large files quadratically expensive. Several articles
 /// are grouped into one PAR2 slice to keep the input-block count near this
 /// target, which is the dominant lever on PAR2 CPU cost.
 const TARGET_PAR2_SLICES: usize = 1000;
+
+/// Returns `(slice_size_bytes, total_input_slices)`.
+///
+/// Finds the smallest `articles_per_slice` multiplier that satisfies both
+/// PAR2 spec limits:
+///   - total input blocks ≤ 32 768
+///   - recovery blocks = floor(input_blocks × redundancy_pct / 100) ≤ 65 535
+///
+/// A performance target of ~[`TARGET_PAR2_SLICES`] is used as the starting
+/// point; a binary search corrects upward when either limit is exceeded.
+fn optimal_par2_slice_size(
+    per_file_articles: &[usize],
+    article_size: usize,
+    redundancy_pct: u8,
+) -> (usize, usize) {
+    let total_articles: usize = per_file_articles.iter().sum();
+    if total_articles == 0 {
+        return (article_size, 0);
+    }
+
+    // Combined input-block limit from both PAR2 spec constraints.
+    // floor(65535 * 100 / pct) is the max total_slices such that
+    // floor(total * pct / 100) <= 65535.
+    let max_input_slices = if redundancy_pct > 0 {
+        (65535usize * 100 / redundancy_pct as usize).min(32768)
+    } else {
+        32768
+    };
+
+    let count_for = |a: usize| -> usize { per_file_articles.iter().map(|&n| n.div_ceil(a)).sum() };
+
+    // Minimum achievable slices: one per non-empty file (when articles_per_slice
+    // is large enough to cover each file in a single slice).
+    let min_slices: usize = per_file_articles.iter().filter(|&&n| n > 0).count();
+    if min_slices > max_input_slices {
+        // Cannot satisfy the spec limit; group all articles and return best effort.
+        return (total_articles * article_size, min_slices);
+    }
+
+    // Performance target: aim for ~TARGET_PAR2_SLICES without exceeding the limit.
+    let target = (total_articles / 10)
+        .clamp(TARGET_PAR2_SLICES, max_input_slices)
+        .min(max_input_slices);
+    let initial_a = total_articles.div_ceil(target).max(1);
+
+    if count_for(initial_a) <= max_input_slices {
+        return (initial_a * article_size, count_for(initial_a));
+    }
+
+    // Binary search: find the minimum `a` such that count_for(a) <= max_input_slices.
+    // Invariant: count_for(lo) > limit, count_for(hi) <= limit.
+    // Upper bound: total_articles guarantees count_for = min_slices <= limit (checked above).
+    let mut lo = initial_a;
+    let mut hi = total_articles;
+
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if count_for(mid) <= max_input_slices {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    let a = hi;
+    (a * article_size, count_for(a))
+}
 
 /// A posted segment, retained for later `.nzb` generation.
 #[derive(Debug, Clone)]
@@ -461,49 +526,18 @@ async fn producer(
 
     // Article count per file — one article is one posted segment.
     let mut per_file_articles = Vec::with_capacity(metas.len());
-    let mut total_articles = 0usize;
     for meta in &metas {
-        let n = yenc::segments(meta.size, article_size).len();
-        per_file_articles.push(n);
-        total_articles += n;
+        per_file_articles.push(yenc::segments(meta.size, article_size).len());
     }
 
-    // A PAR2 input slice spans `articles_per_slice` consecutive articles, so
-    // the input-block count stays near `TARGET_PAR2_SLICES`. Posting still
-    // uses the unchanged per-article segmentation; only the encoder sees the
-    // larger slice.
-    //
-    // For very large datasets, we increase the slice count up to the PAR2
-    // limit of 32,768 to keep the memory footprint of each slice reasonable.
-    let target_slices = (total_articles / 10).clamp(TARGET_PAR2_SLICES, 32768);
-    let articles_per_slice = total_articles.div_ceil(target_slices).max(1);
-    let par2_slice_size = articles_per_slice * article_size;
-
-    // PAR2 splits each file independently; a file's last slice is zero-padded.
-    let total_slices: usize = per_file_articles
-        .iter()
-        .map(|&n| n.div_ceil(articles_per_slice))
-        .sum();
-
-    // The sum might slightly exceed the block limit if many files have small
-    // trailing fragments; if so, we must increase the slice size.
-    let (par2_slice_size, total_slices) = if total_slices > 32768 {
-        let mut articles = articles_per_slice;
-        let mut count = total_slices;
-        while count > 32768 {
-            articles += 1;
-            count = per_file_articles
-                .iter()
-                .map(|&n| n.div_ceil(articles))
-                .sum();
-        }
-        (articles * article_size, count)
-    } else {
-        (par2_slice_size, total_slices)
-    };
+    // Choose the PAR2 slice size: groups consecutive articles into larger slices
+    // to keep input-block count near TARGET_PAR2_SLICES while satisfying both
+    // PAR2 spec limits (32 768 input blocks, 65 535 recovery blocks).
+    let (par2_slice_size, total_slices) =
+        optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2);
 
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
-    let slices_per_pass = (MAX_PAR2_MEMORY / par2_slice_size).max(1);
+    let slices_per_pass = (shared.config.par2_memory_limit / par2_slice_size).max(1);
 
     let mut passes = Vec::new();
     if recovery_count > 0 {
@@ -515,6 +549,16 @@ async fn producer(
         }
     } else {
         passes.push((0, 0));
+    }
+
+    if passes.len() > 1 {
+        shared.emit(crate::progress::ProgressEvent::Status {
+            text: format!(
+                "PAR2 recovery data split into {} passes (memory limit: {} MiB)",
+                passes.len(),
+                shared.config.par2_memory_limit / (1024 * 1024),
+            ),
+        });
     }
 
     let mut par2_files = Vec::new();
@@ -1201,6 +1245,77 @@ mod tests {
     fn par2_base_empty_string() {
         // Should not panic; returns the whole (empty) string.
         assert_eq!(par2_base(""), "");
+    }
+
+    // ── optimal_par2_slice_size ───────────────────────────────────────────────
+
+    #[test]
+    fn optimal_slice_single_file_within_target() {
+        // 500 articles with 10% redundancy: well within limits.
+        let (sz, slices) = optimal_par2_slice_size(&[500], 750_000, 10);
+        assert!(slices <= 32768);
+        assert!((slices * 10 / 100) <= 65535);
+        assert_eq!(
+            sz % 750_000,
+            0,
+            "slice size must be a multiple of article_size"
+        );
+    }
+
+    #[test]
+    fn optimal_slice_no_redundancy_respects_32768_limit() {
+        // 5000 files × 1 article: well within 32768, should satisfy the limit.
+        let per_file = vec![1usize; 5_000];
+        let (sz, slices) = optimal_par2_slice_size(&per_file, 100, 0);
+        assert!(slices <= 32768, "slices={slices}");
+        assert!(sz >= 100);
+    }
+
+    #[test]
+    fn optimal_slice_too_many_files_returns_best_effort() {
+        // 50 000 files × 1 article each: minimum possible is 50 000 slices > 32 768.
+        // The function must not panic and should return the minimum achievable.
+        let per_file = vec![1usize; 50_000];
+        let (_sz, slices) = optimal_par2_slice_size(&per_file, 100, 0);
+        assert_eq!(slices, 50_000, "slices={slices}");
+    }
+
+    #[test]
+    fn optimal_slice_high_redundancy_respects_65535_recovery_limit() {
+        // 200% redundancy: max input slices = 65535 * 100 / 200 = 32767.
+        // 100 files × 400 articles each = 40 000 total articles.
+        // Grouping can reduce to ~1000 slices, well within 32767.
+        let per_file = vec![400usize; 100];
+        let (sz, slices) = optimal_par2_slice_size(&per_file, 100, 200);
+        let recovery = slices * 200 / 100;
+        assert!(slices <= 32767, "slices={slices}");
+        assert!(recovery <= 65535, "recovery={recovery}");
+        assert!(sz >= 100);
+    }
+
+    #[test]
+    fn optimal_slice_mixed_sizes() {
+        // One large file (10 000 articles) and many tiny files (1 article each).
+        let mut per_file = vec![1usize; 5_000];
+        per_file.push(10_000);
+        let (sz, slices) = optimal_par2_slice_size(&per_file, 750_000, 10);
+        assert!(slices <= 32768, "slices={slices}");
+        assert!((slices * 10 / 100) <= 65535);
+        assert_eq!(sz % 750_000, 0);
+    }
+
+    #[test]
+    fn optimal_slice_empty_input() {
+        let (sz, slices) = optimal_par2_slice_size(&[], 750_000, 10);
+        assert_eq!(slices, 0);
+        assert_eq!(sz, 750_000);
+    }
+
+    #[test]
+    fn optimal_slice_single_article() {
+        let (sz, slices) = optimal_par2_slice_size(&[1], 750_000, 5);
+        assert_eq!(slices, 1);
+        assert_eq!(sz, 750_000);
     }
 
     // ── resolve_date ──────────────────────────────────────────────────────────
