@@ -828,7 +828,7 @@ impl RecoveryEncoder {
         self.queued_slices.clear();
     }
 
-    fn flush_scalar_work(
+    pub(super) fn flush_scalar_work(
         buffers: &mut [Vec<u16>],
         queued: &[Vec<u8>],
         start_index: usize,
@@ -1001,6 +1001,54 @@ mod tests {
         expected.extend_from_slice(&w0.to_le_bytes());
         expected.extend_from_slice(&w1.to_le_bytes());
         assert_eq!(recovery[1].data, expected);
+    }
+
+    // Slices of ≥ 16 bytes trigger the SIMD path (AVX2/SSSE3 on x86, NEON on
+    // aarch64). This test compares SIMD output against the scalar reference to
+    // ensure both produce bit-identical recovery data.
+    #[test]
+    fn simd_recovery_matches_scalar_for_larger_slices() {
+        // 32-byte slices: blocks_16 = 2 (NEON), blocks_32 = 1 (AVX2) — exercises SIMD.
+        let slice_size = 32;
+        let total_slices = 3;
+        let recovery_count = 4;
+
+        // Build a deterministic non-trivial input.
+        let mut slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| (0..slice_size).map(|i| ((s * 37 + i * 13 + 7) & 0xFF) as u8).collect())
+            .collect();
+
+        // Run through the SIMD encoder.
+        let mut enc = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc.add_slice(s.clone());
+        }
+        let (simd_recovery, _) = enc.finish();
+
+        // Build a scalar reference: temporarily patch out SIMD by calling
+        // flush_scalar_work directly.
+        let gf = Gf16::new();
+        let logbases = input_logbases(total_slices);
+        let mut scalar_buffers = vec![vec![0u16; slice_size / 2]; recovery_count];
+        RecoveryEncoder::flush_scalar_work(
+            &mut scalar_buffers,
+            &slices,
+            0,
+            &logbases,
+            0,
+            &gf,
+        );
+        let scalar_recovery: Vec<Vec<u8>> = scalar_buffers
+            .into_iter()
+            .map(|buf| buf.into_iter().flat_map(|w| w.to_le_bytes()).collect())
+            .collect();
+
+        for (i, (simd, scalar)) in simd_recovery.iter().zip(&scalar_recovery).enumerate() {
+            assert_eq!(
+                simd.data, *scalar,
+                "SIMD and scalar disagree on recovery block {i}"
+            );
+        }
     }
 
     #[test]
