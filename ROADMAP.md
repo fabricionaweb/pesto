@@ -829,6 +829,101 @@ and is designed for confirming propagation to the server with a delay.
 
 ---
 
+## Phase 24 — PAR2 Performance & Compatibility
+
+Improvements to the PAR2 implementation. Each sub-phase is independent and
+can ship separately.
+
+### 24a — SSE2/SSSE3 intermediate SIMD path ✅
+
+The encoder currently dispatches to AVX2 or falls back to scalar. CPUs that
+have SSSE3 but not AVX2 (Sandy Bridge, Ivy Bridge) take the slow scalar path.
+A SSSE3 path using 128-bit `_mm_shuffle_epi8` nibble tables covers every x86-64
+CPU made since ~2007.
+
+- [x] Implement `flush_ssse3()` using `__m128i` and `_mm_shuffle_epi8`
+      (same 4-nibble algorithm as the AVX2 path, halved register width)
+- [x] Runtime dispatch chain: AVX2 → SSSE3 → scalar
+- [ ] Benchmark on a pre-AVX2 machine and document the speedup
+
+### 24b — AVX-512 + GFNI path
+
+Intel Ice Lake (2019+) and later server CPUs expose `AVX-512BW` and GFNI
+(`gf2p8affine_epi64_epi8`). GFNI performs GF(2^8) affine transforms in a
+single instruction; with a two-step decomposition GF(2^16) multiplication
+becomes two `vgf2p8affineinvqb` on 512-bit vectors — roughly 4× the AVX2
+shuffle throughput.
+
+- [ ] Precompute the pair of 8×8 affine matrices that maps each coefficient
+      to a GF(2^8) affine operation (one matrix per coefficient, computed once
+      per flush batch)
+- [ ] Implement `flush_avx512_gfni()` using `_mm512_gf2p8affine_epi64_epi8`
+- [ ] Runtime dispatch: GFNI+AVX512BW → AVX2 → SSSE3 → scalar (via
+      `std::is_x86_feature_detected!("avx512bw")` + `"gfni"`)
+
+### 24c — ARM NEON path ✅
+
+The encoder is gated on `#[cfg(target_arch = "x86_64")]`. Apple Silicon M-series
+and ARM servers (AWS Graviton, Ampere Altra) fall back to scalar. The AArch64
+NEON instruction `vqtbl1q_u8` is the direct equivalent of `_mm_shuffle_epi8`
+and enables the same 4-nibble shuffle algorithm.
+
+- [x] Implement `flush_neon()` using `vqtbl1q_u8` for `target_arch = "aarch64"`
+- [x] Mirror the 32 KiB cache-blocking strategy from the x86 paths
+- [x] Add `#[cfg(target_arch = "aarch64")]` dispatch alongside the x86 chain
+- [ ] Verify correctness with the existing Reed-Solomon unit tests on an ARM target
+
+### 24d — XOR bit-dependency method (x86, advanced)
+
+For a fixed GF(16) coefficient it is possible to precompute which input bits
+XOR into each output bit (a 16×16 GF(2) matrix) and then apply that as a
+sequence of `vpand` + `vpxor` with operands in registers — no `vpshufb`, no
+table loads after setup. For large recovery sets the working set stays entirely
+in registers, eliminating all L1 miss pressure in the inner loop.
+
+This is the most complex item: the coefficient-specific XOR program must be
+generated at runtime once per (recovery-block, coefficient) pair.
+
+- [ ] Implement a code-generator that, given a `u16` coefficient, emits a
+      sequence of `(mask, shift, xor_into_reg)` operations computable with
+      `vpand`/`vpsrl`/`vpxor`
+- [ ] Integrate as `flush_avx2_xor()` and benchmark against the current shuffle path
+- [ ] Ship only if the benchmark shows ≥ 20 % real-world improvement on a
+      representative recovery set (≥ 50 recovery blocks, 1 MiB slice size)
+
+### 24e — Optimal slice size selection ✅
+
+The current implementation derives a fixed slice size from `--par2-block-size`
+or a simple ratio of total file size. For mixed-size sets (e.g. one 10 GiB file
++ twenty 1 MiB sidecar files) a naive size either wastes blocks on tiny files or
+hits the PAR2 spec limit of 32 768 input blocks. A binary search over candidate
+sizes finds the optimal value automatically.
+
+- [x] Implement `optimal_par2_slice_size(per_file_articles, article_size, redundancy_pct)`
+      that binary-searches the smallest `articles_per_slice` such that:
+      total input blocks ≤ 32 768 **and** total recovery blocks ≤ 65 535
+- [x] Wire into `poster.rs` replacing the previous linear correction loop
+- [x] Unit tests: empty input, single article, single file, no redundancy,
+      200% redundancy (recovery limit binding), mixed sizes, pathological
+      case (more files than spec limit → best-effort)
+
+### 24f — Memory-bounded multi-pass recovery computation ✅
+
+When `recovery_count × slice_size` exceeds a configurable threshold (default:
+1 GiB), the encoder splits recovery blocks into groups and makes multiple passes
+over the input data rather than holding all recovery buffers in RAM simultaneously.
+The tradeoff is extra I/O reads in exchange for bounded memory.
+
+- [x] Split recovery blocks into groups of `floor(memory_limit / slice_size)` blocks
+- [x] For each group: iterate over input files, feed all slices, call `finish()`,
+      write the PAR2 volumes for that group, then free the buffers
+- [x] Expose `[posting] par2_memory_limit` config key (default `"1 GiB"`,
+      parseable with the same `parse_upload_rate`-style helper, e.g. `"512 MiB"`)
+- [x] Emit a `ProgressEvent::Status` when multi-pass is triggered so the user
+      understands the extra I/O passes
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
