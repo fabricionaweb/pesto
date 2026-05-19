@@ -5,7 +5,7 @@
 [![CI](https://github.com/franzopl/pesto/actions/workflows/ci.yml/badge.svg)](https://github.com/franzopl/pesto/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/pesto-poster.svg)](https://crates.io/crates/pesto-poster)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
 yEnc-encodes files, posts them over parallel NNTP connections, generates a `.nzb`,
 and stays out of your way. Inspired by [`nyuu`](https://github.com/animetosho/Nyuu),
@@ -65,7 +65,7 @@ The installed binary is named `pesto`.
 
 ## Build from source
 
-Requires Rust **1.75 or newer** — install or update via <https://rustup.rs>.
+Requires Rust **1.87 or newer** — install or update via <https://rustup.rs>.
 
 ```bash
 cargo build --release
