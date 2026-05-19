@@ -74,9 +74,12 @@ fn optimal_par2_slice_size(
         return (total_articles * article_size, min_slices);
     }
 
-    // Performance target: aim for ~TARGET_PAR2_SLICES without exceeding the limit.
-    let target = (total_articles / 10)
-        .clamp(TARGET_PAR2_SLICES, max_input_slices)
+    // Target ~2.5 % of total articles as input slices (divisor 40), capped at
+    // 2000. Scaling at 10 % (divisor 10, the old behavior) produced tens of
+    // thousands of slices on large uploads, making the GF(2^16) RS multiply
+    // O(slices²) and killing encoder throughput.
+    let target = (total_articles / 40)
+        .clamp(TARGET_PAR2_SLICES, 2000)
         .min(max_input_slices);
     let initial_a = total_articles.div_ceil(target).max(1);
 
@@ -598,9 +601,16 @@ async fn producer(
         Vec::new()
     };
 
-    // Announce how many recovery slices will be written across all passes, so
-    // the renderer can show a progress bar for the PAR2 write phase.
     if recovery_count > 0 {
+        shared.emit(crate::progress::ProgressEvent::Status {
+            text: format!(
+                "PAR2: {} slices · {}% redundancy · slice size {} · memory limit {} MiB",
+                recovery_count,
+                shared.config.par2,
+                crate::progress::format_size(par2_slice_size as u64),
+                memory_limit / (1024 * 1024),
+            ),
+        });
         shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {
             total: recovery_count as u32,
         });

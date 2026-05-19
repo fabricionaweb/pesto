@@ -1026,6 +1026,11 @@ impl RenderState {
             ));
         }
 
+        // --- persistent status line (e.g. PAR2 details) ------------------
+        if !self.status.is_empty() {
+            lines.push(ansi(&self.status, "36")); // cyan
+        }
+
         // --- process resource stats (Linux /proc/self) -------------------
         #[cfg(target_os = "linux")]
         if self.proc_rss_bytes > 0 {
