@@ -296,8 +296,11 @@ impl RecoveryEncoder {
                 let byte_offset = chunk_idx * chunk_size * 2;
                 let byte_len = buffer_chunk.len() * 2;
                 let blocks_32 = byte_len / 32;
-                let remainder = byte_len % 32;
 
+                // Outer loop: one input slice at a time → each slice's chunk
+                // is read linearly, the prefetcher stays ahead, and the 32 KiB
+                // buffer_chunk remains L1-resident across all slices.
+                let remainder = byte_len % 32;
                 for (q_idx, slice) in queued.iter().enumerate() {
                     let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
                     let (
