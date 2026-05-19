@@ -533,7 +533,7 @@ async fn producer(
         optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2);
 
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
-    
+
     // Auto-detect safe RAM limit if not specified (70% of available RAM)
     let memory_limit = match shared.config.par2_memory_limit {
         Some(limit) => limit,
@@ -542,7 +542,7 @@ async fn producer(
             sys.refresh_memory();
             let available_ram = sys.available_memory();
             let safe_limit = (available_ram as f64 * 0.70) as usize;
-            
+
             // At least 256MB as a bare minimum fallback
             safe_limit.max(256 * 1024 * 1024)
         }
