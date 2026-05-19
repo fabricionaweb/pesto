@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-19
+
+### Fixed
+- `rust-version` corrected from `1.75` to `1.87` (code already used APIs
+  stable since 1.87; clippy MSRV check was failing in CI)
+- Removed useless `PathBuf::from()` wrapping in `config.rs` history_dir map
+  (clippy `useless_conversion` warning)
+- Applied `cargo fmt` to `config.rs`, `history.rs`, `main.rs`, `progress.rs`
+  (CI format check was failing)
+
+### Docs
+- Published to crates.io as `pesto-poster` (binary name remains `pesto`)
+- README: rust-version badge updated to 1.87+; `cargo install pesto-poster`
+  documented in Installing section
+
 ### Changed
 - History catalog location decoupled from the `upapasta` directory; configurable
   via `output.history_dir` (default: `~/.config/pesto`; set to
@@ -146,7 +161,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Phase 19** — Test coverage: unit tests for all modules; mock-NNTP
   integration tests for retry and resume logic.
 
-[Unreleased]: https://github.com/franzopl/pesto/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/franzopl/pesto/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/franzopl/pesto/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/franzopl/pesto/compare/v0.2.2...v0.2.4
 [0.2.3]: https://github.com/franzopl/pesto/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/franzopl/pesto/compare/v0.2.1...v0.2.2
