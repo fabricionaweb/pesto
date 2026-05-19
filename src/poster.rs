@@ -705,6 +705,7 @@ async fn producer(
             } else {
                 Vec::new()
             };
+            let mut par2_slices_fed: usize = 0;
 
             let mut i: u32 = 0;
             while let Some((offset, buf)) = read_rx.recv().await {
@@ -725,6 +726,11 @@ async fn producer(
                     par2_accum.extend_from_slice(&buf);
                     if par2_accum.len() >= par2_slice_size {
                         feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
+                        par2_slices_fed += 1;
+                        shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
+                            done: par2_slices_fed,
+                            total: total_slices,
+                        });
                     }
                 }
 
