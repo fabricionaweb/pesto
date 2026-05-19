@@ -742,7 +742,8 @@ Implemented flags missing from the reference table:
 
 - [x] Document downloading a pre-built binary from GitHub Releases
 - [x] Note how to add the binary to `PATH` on Linux and Windows
-- [ ] Add `cargo install pesto` once published to crates.io
+- [x] `cargo install pesto-poster` documented; published to crates.io as
+      `pesto-poster` (binary name remains `pesto`)
 
 ### 22f — CHANGELOG.md ✅
 
