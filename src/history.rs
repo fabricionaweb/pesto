@@ -210,7 +210,12 @@ fn stamp_now() -> String {
 
 /// Archive the NZB file to `<catalog_dir>/nzb/<stamp>_<name>.nzb`.
 /// Returns the archived path on success.
-fn archive_nzb(src: &Path, stamp: &str, name: &str, override_dir: Option<&Path>) -> Option<PathBuf> {
+fn archive_nzb(
+    src: &Path,
+    stamp: &str,
+    name: &str,
+    override_dir: Option<&Path>,
+) -> Option<PathBuf> {
     let dir = catalog_dir(override_dir)?.join("nzb");
     let safe: String = name
         .chars()
@@ -252,7 +257,9 @@ fn json_opt(v: Option<&str>) -> String {
 /// use the default. Errors are silently ignored so a catalog write failure
 /// never aborts an otherwise-successful upload.
 pub fn record_upload(rec: &UploadRecord<'_>, history_dir: Option<&Path>) {
-    let Some(dir) = catalog_dir(history_dir) else { return };
+    let Some(dir) = catalog_dir(history_dir) else {
+        return;
+    };
     let history = dir.join("history.jsonl");
 
     let stamp = stamp_now();

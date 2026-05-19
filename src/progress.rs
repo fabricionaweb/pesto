@@ -627,8 +627,8 @@ impl RenderState {
         if mean < 1.0 {
             return None;
         }
-        let variance = samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
-            / samples.len() as f64;
+        let variance =
+            samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
         let sigma = variance.sqrt();
         let cv = sigma / mean;
 
@@ -738,8 +738,8 @@ impl RenderState {
             return;
         }
         // Record a speed sample for sparkline + ETA confidence (phase 21c/21d).
-        let current_bps = self.done_bytes.saturating_sub(self.prev_done_bytes) as f64
-            * (1000.0 / 200.0); // per-tick delta → bytes/s (200 ms tick)
+        let current_bps =
+            self.done_bytes.saturating_sub(self.prev_done_bytes) as f64 * (1000.0 / 200.0); // per-tick delta → bytes/s (200 ms tick)
         self.prev_done_bytes = self.done_bytes;
         if !final_draw && self.done_bytes > 0 {
             self.push_speed_sample(current_bps);
@@ -897,7 +897,10 @@ impl RenderState {
                     let left = conn_cell(idx, &self.conn_files[idx], st_l);
                     let line = if idx + 1 < conns {
                         let st_r = self.conn_state.get(idx + 1).copied().unwrap_or_default();
-                        format!("{left}{}", conn_cell(idx + 1, &self.conn_files[idx + 1], st_r))
+                        format!(
+                            "{left}{}",
+                            conn_cell(idx + 1, &self.conn_files[idx + 1], st_r)
+                        )
                     } else {
                         left
                     };
@@ -1074,10 +1077,10 @@ fn conn_cell(idx: usize, file: &Option<String>, state: ConnState) -> String {
     };
     let raw = format!("conn {:<2} ▸ {label}", idx + 1);
     let coloured = match state {
-        ConnState::Busy => ansi(&raw, "32"),      // green
-        ConnState::Auth => ansi(&raw, "33"),      // yellow
-        ConnState::Retrying => ansi(&raw, "31"),  // red
-        ConnState::Idle => ansi(&raw, "2"),       // dim
+        ConnState::Busy => ansi(&raw, "32"),     // green
+        ConnState::Auth => ansi(&raw, "33"),     // yellow
+        ConnState::Retrying => ansi(&raw, "31"), // red
+        ConnState::Idle => ansi(&raw, "2"),      // dim
     };
     // pad by visual width (raw chars, not ANSI-escaped)
     let visual_len = raw.chars().count();
@@ -1268,7 +1271,11 @@ pub fn print_tree(files: &[crate::walk::InputFile]) {
     for (di, dir) in dirs.iter().enumerate() {
         let leaves = &tree[dir];
         let is_last_dir = di == dir_count - 1;
-        let dir_connector = if is_last_dir { "└──" } else { "├──" };
+        let dir_connector = if is_last_dir {
+            "└──"
+        } else {
+            "├──"
+        };
 
         if dir.is_empty() {
             // Files at top level — print them directly
@@ -1283,7 +1290,11 @@ pub fn print_tree(files: &[crate::walk::InputFile]) {
             for (li, leaf) in leaves.iter().enumerate() {
                 let is_last = li == leaves.len() - 1;
                 let conn = if is_last { "└──" } else { "├──" };
-                eprintln!("{prefix}{conn} {} ({})", leaf.filename, format_size(leaf.size));
+                eprintln!(
+                    "{prefix}{conn} {} ({})",
+                    leaf.filename,
+                    format_size(leaf.size)
+                );
             }
         }
     }

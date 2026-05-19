@@ -669,18 +669,21 @@ async fn run_single_upload(
                     } else {
                         None
                     };
-                    pesto::history::record_upload(&pesto::history::UploadRecord {
-                        name: entry_label,
-                        obfuscated_name: obf_name,
-                        password: effective_password.as_deref(),
-                        total_bytes,
-                        group: config.groups.first().map(String::as_str),
-                        server: Some(config.host.as_str()),
-                        par2_redundancy: par2_pct,
-                        duration_secs: upload_start.elapsed().as_secs_f64(),
-                        nzb_path: Some(&out.display().to_string()),
-                        subject: config.nzb_name.as_deref().or(Some(entry_label)),
-                    }, config.history_dir.as_deref());
+                    pesto::history::record_upload(
+                        &pesto::history::UploadRecord {
+                            name: entry_label,
+                            obfuscated_name: obf_name,
+                            password: effective_password.as_deref(),
+                            total_bytes,
+                            group: config.groups.first().map(String::as_str),
+                            server: Some(config.host.as_str()),
+                            par2_redundancy: par2_pct,
+                            duration_secs: upload_start.elapsed().as_secs_f64(),
+                            nzb_path: Some(&out.display().to_string()),
+                            subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                        },
+                        config.history_dir.as_deref(),
+                    );
                 }
 
                 Some(xml)

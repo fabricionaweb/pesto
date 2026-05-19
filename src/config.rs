@@ -600,7 +600,7 @@ impl Config {
             history: cli
                 .history
                 .unwrap_or_else(|| file.output.history.unwrap_or(true)),
-            history_dir: file.output.history_dir.map(|s| PathBuf::from(
+            history_dir: file.output.history_dir.map(|s| {
                 if s.starts_with("~/") {
                     std::env::var_os("HOME")
                         .map(|h| PathBuf::from(h).join(&s[2..]))
@@ -608,7 +608,7 @@ impl Config {
                 } else {
                     PathBuf::from(&s)
                 }
-            )),
+            }),
             notify_webhook: file.notify.webhook_url,
             notify_ntfy: file.notify.ntfy_topic,
             notify: cli.notify,
