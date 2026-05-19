@@ -117,7 +117,10 @@ async fn par2_only_directory_repair_recreates_tree() {
             std::fs::remove_dir_all(&root).ok();
             return;
         }
-        Ok(out) => assert!(out.status.success(), "par2 verify failed on the pristine tree"),
+        Ok(out) => assert!(
+            out.status.success(),
+            "par2 verify failed on the pristine tree"
+        ),
     }
 
     // Delete the whole nested subfolder, then repair from the PAR2 set.

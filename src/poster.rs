@@ -600,7 +600,11 @@ async fn producer(
             let enc = RecoveryEncoder::new(par2_slice_size, total_slices, exp_start, rec_count);
             // Melhoria 1: on pass 0 enable parallel checksum computation inside
             // the encoder so rayon::join overlaps MD5+CRC32 with RS work.
-            let enc = if pass_idx == 0 { enc.with_checksums() } else { enc };
+            let enc = if pass_idx == 0 {
+                enc.with_checksums()
+            } else {
+                enc
+            };
             Some(enc)
         } else {
             None
