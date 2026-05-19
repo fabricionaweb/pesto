@@ -79,10 +79,25 @@ cargo fmt
 > Note: the Rust toolchain (`cargo`/`rustc`) is not yet installed in this
 > environment. Install it via <https://rustup.rs> before building.
 
+## Pre-commit checklist
+
+**Run all three checks locally and confirm they pass before every `git commit`
+and `git push`.** The CI gate enforces the same checks; a push that breaks CI
+is a wasted round-trip.
+
+```bash
+cargo fmt --check          # must produce no output
+cargo clippy --all-targets -- -D warnings   # must exit 0
+cargo test                 # all tests must pass
+```
+
+Never skip or work around these steps (e.g. `--no-verify`). If a check fails,
+fix the root cause before committing.
+
 ## Conventions
 
 - Formatting: `cargo fmt` (defaults).
-- Lints: code must pass `cargo clippy -D warnings`.
+- Lints: code must pass `cargo clippy --all-targets -D warnings`.
 - Commits: short imperative messages. Group by roadmap phase.
 - yEnc and NNTP have specifications; when changing them, cite the relevant
   part of the spec in a comment instead of "tweaking until it works".
