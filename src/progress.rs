@@ -112,6 +112,8 @@ pub enum ProgressEvent {
         /// Memory limit in bytes.
         memory_limit: usize,
     },
+    /// One PAR2 input slice has been fed to the encoder; shows encode progress.
+    Par2InputProgress { done: usize, total: usize },
     /// PAR2 recovery slice writing has started; `total` slices will be written.
     Par2WriteStarted { total: u32 },
     /// One PAR2 recovery slice has been appended to its volume file on disk.
@@ -274,6 +276,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
                     }
                     ProgressEvent::Par2EncodeStarted { .. } => {}
+                    ProgressEvent::Par2InputProgress { .. } => {}
                     ProgressEvent::Par2WriteStarted { total } => {
                         let _ = writeln!(out, r#"{{"type":"par2_write_started","total":{total}}}"#);
                     }
@@ -442,6 +445,10 @@ struct RenderState {
     check_start: Instant,
     // PAR2 encode info block (shown while encoding, inspired by parpar)
     par2_info: Option<Par2Info>,
+    // PAR2 input slice encode progress
+    par2_encode_done: usize,
+    par2_encode_total: usize,
+    par2_encode_start: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -492,6 +499,9 @@ impl RenderState {
             check_failed: 0,
             check_start: Instant::now(),
             par2_info: None,
+            par2_encode_done: 0,
+            par2_encode_total: 0,
+            par2_encode_start: Instant::now(),
             proc_rss_bytes: 0,
             proc_cpu_pct: 0.0,
             proc_prev_ticks: 0,
@@ -631,6 +641,9 @@ impl RenderState {
                 threads,
                 memory_limit,
             } => {
+                self.par2_encode_total = input_slices;
+                self.par2_encode_done = 0;
+                self.par2_encode_start = Instant::now();
                 self.par2_info = Some(Par2Info {
                     input_bytes,
                     input_slices,
@@ -643,6 +656,10 @@ impl RenderState {
                     threads,
                     memory_limit,
                 });
+            }
+            ProgressEvent::Par2InputProgress { done, total } => {
+                self.par2_encode_done = done;
+                self.par2_encode_total = total;
             }
             ProgressEvent::Par2WriteStarted { total } => {
                 self.par2_write_active = true;
@@ -949,6 +966,26 @@ impl RenderState {
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+        }
+
+        // --- PAR2 encode progress bar (shown while computing RS, before upload) ---
+        if self.par2_encode_total > 0 && self.par2_encode_done < self.par2_encode_total {
+            let elapsed = self.par2_encode_start.elapsed().as_secs_f64().max(0.001);
+            let frac =
+                (self.par2_encode_done as f64 / self.par2_encode_total as f64).clamp(0.0, 1.0);
+            let pct = (frac * 100.0).round() as u64;
+            let bar = render_bar(frac, 22);
+            let rate = self.par2_encode_done as f64 / elapsed; // slices/s
+            let eta_str = if rate > 0.01 && self.par2_encode_done < self.par2_encode_total {
+                let remaining = (self.par2_encode_total - self.par2_encode_done) as f64 / rate;
+                format!(" · ETA {}", format_duration(remaining))
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "▸ PAR2 encode [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
+                self.par2_encode_done, self.par2_encode_total,
+            ));
         }
 
         // --- overall posting box (only after posting has started) --------
