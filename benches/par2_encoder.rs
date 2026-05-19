@@ -40,11 +40,7 @@ fn make_slice(seed: u64) -> Vec<u8> {
 
 /// Run the encoder with `path` for at least `MIN_DURATION` and return
 /// (input_mib_per_s, gf_madd_gib_per_s).
-fn measure(
-    input_mib: usize,
-    redundancy_pct: usize,
-    path: BenchPath,
-) -> (f64, f64) {
+fn measure(input_mib: usize, redundancy_pct: usize, path: BenchPath) -> (f64, f64) {
     let input_bytes = input_mib * 1024 * 1024;
     let total_slices = input_bytes.div_ceil(SLICE_SIZE);
     let recovery_count = (total_slices * redundancy_pct) / 100;
@@ -73,8 +69,7 @@ fn measure(
 
     let elapsed = total_elapsed.as_secs_f64() / iters as f64;
     let in_mib = (total_slices * SLICE_SIZE) as f64 / MIB;
-    let madd_gib =
-        (total_slices as f64 * recovery_count as f64 * SLICE_SIZE as f64) / GIB;
+    let madd_gib = (total_slices as f64 * recovery_count as f64 * SLICE_SIZE as f64) / GIB;
     (in_mib / elapsed, madd_gib / elapsed)
 }
 
@@ -110,15 +105,33 @@ fn main() {
     println!("PAR2 encoder benchmark — slice {SLICE_SIZE} B — {threads} rayon thread(s)");
     println!(
         "SIMD available: GFNI+AVX512={} | AVX2={} | SSSE3={} | scalar=always",
-        yn(has_gfni), yn(has_avx2), yn(has_ssse3),
+        yn(has_gfni),
+        yn(has_avx2),
+        yn(has_ssse3),
     );
     println!();
 
     let scenarios = [
-        Scenario { label: "64 MiB  @ 10%", input_mib: 64,  redundancy_pct: 10 },
-        Scenario { label: "256 MiB @ 10%", input_mib: 256, redundancy_pct: 10 },
-        Scenario { label: "256 MiB @ 20%", input_mib: 256, redundancy_pct: 20 },
-        Scenario { label: "512 MiB @ 10%", input_mib: 512, redundancy_pct: 10 },
+        Scenario {
+            label: "64 MiB  @ 10%",
+            input_mib: 64,
+            redundancy_pct: 10,
+        },
+        Scenario {
+            label: "256 MiB @ 10%",
+            input_mib: 256,
+            redundancy_pct: 10,
+        },
+        Scenario {
+            label: "256 MiB @ 20%",
+            input_mib: 256,
+            redundancy_pct: 20,
+        },
+        Scenario {
+            label: "512 MiB @ 10%",
+            input_mib: 512,
+            redundancy_pct: 10,
+        },
     ];
 
     // Table header
@@ -131,14 +144,12 @@ fn main() {
     #[cfg(target_arch = "x86_64")]
     let paths: &[(BenchPath, bool, &str)] = &[
         (BenchPath::Avx512Gfni, has_gfni, "GFNI+AVX512"),
-        (BenchPath::Avx2,       has_avx2, "AVX2"),
-        (BenchPath::Ssse3,      has_ssse3, "SSSE3"),
-        (BenchPath::Scalar,     true,      "scalar"),
-    ];
-    #[cfg(not(target_arch = "x86_64"))]
-    let paths: &[(BenchPath, bool, &str)] = &[
+        (BenchPath::Avx2, has_avx2, "AVX2"),
+        (BenchPath::Ssse3, has_ssse3, "SSSE3"),
         (BenchPath::Scalar, true, "scalar"),
     ];
+    #[cfg(not(target_arch = "x86_64"))]
+    let paths: &[(BenchPath, bool, &str)] = &[(BenchPath::Scalar, true, "scalar")];
 
     for s in &scenarios {
         print!("{:<18}", s.label);
@@ -166,8 +177,7 @@ fn main() {
     #[cfg(target_arch = "x86_64")]
     if has_avx2 || has_ssse3 || has_gfni {
         println!("Speedup vs scalar (GF madd rate, 256 MiB @ 10%):");
-        let (_, scalar_madd) =
-            measure(256, 10, BenchPath::Scalar);
+        let (_, scalar_madd) = measure(256, 10, BenchPath::Scalar);
         for (path, available, label) in paths {
             if *available && *path != BenchPath::Scalar {
                 let (_, path_madd) = measure(256, 10, *path);
@@ -179,5 +189,9 @@ fn main() {
 }
 
 fn yn(b: bool) -> &'static str {
-    if b { "yes" } else { "no" }
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
 }
