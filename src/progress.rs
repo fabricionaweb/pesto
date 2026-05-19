@@ -750,7 +750,10 @@ impl RenderState {
             return Some((mid, mid, false));
         }
         let low = remaining / (mean + sigma).max(1.0);
-        let high = remaining / (mean - sigma).max(1.0);
+        // Clamp high to 10× low so instability never produces absurd ranges.
+        // When sigma ≥ mean the lower-bound divisor approaches zero, which
+        // would otherwise yield millions of hours.
+        let high = (remaining / (mean - sigma).max(1.0)).min(low * 10.0);
         Some((low, high, cv >= 0.3))
     }
 
