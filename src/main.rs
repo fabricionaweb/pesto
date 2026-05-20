@@ -449,7 +449,8 @@ async fn run_single_upload(
     });
     let effective_password: Option<String> = config.compress_password.clone();
 
-    let compress_temp_dir: Option<PathBuf>;
+    // Holds the CompressResult so its temp storage stays alive until posting ends.
+    let _compress_temp: Option<pesto::compress::CompressResult>;
     if let Some(fmt_str) = &compress_format_str {
         let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
             anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
@@ -477,13 +478,6 @@ async fn run_single_upload(
             archive_stem
         };
 
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "pesto_compress_{}_{}",
-            std::process::id(),
-            entry_label
-        ));
-        compress_temp_dir = Some(tmp_dir.clone());
-
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
         let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
 
@@ -491,50 +485,34 @@ async fn run_single_upload(
             total_bytes: compress_input_bytes,
         });
 
-        let archive_path_for_poll =
-            tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
-        let poll_tx = progress_tx.clone();
-        let poll_path = archive_path_for_poll.clone();
-        let poll_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
-                    let _ = poll_tx.send(pesto::progress::ProgressEvent::CompressProgress {
-                        bytes_written: meta.len(),
-                    });
-                }
-            }
-        });
-
         let compress_inputs = fs_paths.clone();
         let compress_stem = archive_stem.clone();
-        let compress_dest = tmp_dir.clone();
         let compress_pass = effective_password.clone();
+        let tx = progress_tx.clone();
         let result = tokio::task::spawn_blocking(move || {
             compress(
                 &compress_inputs,
                 &compress_stem,
-                &compress_dest,
                 format,
                 compress_pass.as_deref(),
+                |bytes| {
+                    let _ = tx.send(pesto::progress::ProgressEvent::CompressProgress {
+                        bytes_written: bytes,
+                    });
+                },
             )
         })
         .await
         .context("compressor task panicked")??;
 
-        poll_handle.abort();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
 
-        let archive_name = result
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let archive_name = format!("{}.{}", archive_stem, format.extension());
+        let archive_path = result.path.clone();
+        _compress_temp = Some(result);
+
         inputs = vec![pesto::walk::InputFile {
-            path: result.path,
+            path: archive_path,
             name: archive_name,
         }];
 
@@ -545,7 +523,7 @@ async fn run_single_upload(
             }
         }
     } else {
-        compress_temp_dir = None;
+        _compress_temp = None;
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -841,10 +819,7 @@ async fn run_single_upload(
         }
     }
 
-    // Cleanup temp dirs.
-    if let Some(dir) = compress_temp_dir {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // _compress_temp dropped here, deleting the archive temp file automatically.
 
     Ok(UploadResult {
         segments: outcome.segments,

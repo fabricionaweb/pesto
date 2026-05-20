@@ -5,13 +5,14 @@
 //! (no compression — PAR2 handles integrity; store keeps the pipeline fast).
 //!
 //! Supported formats:
-//! - `7z`  — via the `7z` CLI (p7zip); header encryption with `-mhe=on`
-//! - `zip` — via the `7z` CLI; no header encryption (zip spec limitation)
+//! - `7z`  — via the `7z` CLI (p7zip); piped through stdout on Unix so no
+//!   intermediate file is needed; header encryption with `-mhe=on`
+//! - `zip` — via the `7z` CLI; written to a temp file (zip requires seeking)
 //! - `rar` — via the `rar` CLI (not distributed; must be in PATH)
 //!
-//! The caller is responsible for deleting the returned archive path when done.
+//! [`CompressResult`] owns its temp storage and cleans up on drop.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -50,58 +51,141 @@ impl std::fmt::Display for ArchiveFormat {
     }
 }
 
-/// Result of a compression run.
+/// Owns the temporary storage backing a compressed archive.
+// Fields exist solely to keep the temp storage alive until this value is dropped.
+#[allow(dead_code)]
+enum TempCleanup {
+    /// The archive was streamed directly into this named temp file.
+    File(tempfile::NamedTempFile),
+    /// The archive was written by an external tool into this temp directory.
+    Dir(tempfile::TempDir),
+}
+
+/// Result of a compression run. Owns its temp storage; the archive file is
+/// deleted when this value is dropped.
 pub struct CompressResult {
-    /// Path to the created archive (in a temp directory).
+    /// Path to the created archive.
     pub path: PathBuf,
     /// Archive format used.
     pub format: ArchiveFormat,
+    _cleanup: TempCleanup,
 }
 
 /// Create an archive containing all files listed in `inputs`.
 ///
-/// `archive_stem` is the base name of the archive file (without extension).
-/// `dest_dir` is where the archive file is written.
+/// `archive_stem` is the base name of the archive (without extension).
 /// `password` is an optional password to protect the archive.
+/// `on_progress` is called periodically with the number of bytes written so far.
 ///
-/// Each path in `inputs` is added at the root of the archive, preserving
-/// only the base name (not the full filesystem path). For a directory upload
-/// the caller should pass the root directory path so the internal structure
-/// is preserved.
+/// For the 7z format on Unix the archive is streamed through stdout without
+/// writing a full intermediate file, so `on_progress` reflects actual bytes
+/// flowing through rather than a polled file-size estimate.
 pub fn compress(
     inputs: &[PathBuf],
     archive_stem: &str,
-    dest_dir: &Path,
     format: ArchiveFormat,
     password: Option<&str>,
+    on_progress: impl Fn(u64),
 ) -> Result<CompressResult> {
-    std::fs::create_dir_all(dest_dir)
-        .with_context(|| format!("creating temp dir `{}`", dest_dir.display()))?;
-
-    let archive_name = format!("{}.{}", archive_stem, format.extension());
-    let archive_path = dest_dir.join(&archive_name);
-
     match format {
-        ArchiveFormat::SevenZip | ArchiveFormat::Zip => {
-            compress_with_7z(&archive_path, inputs, format, password)?;
+        ArchiveFormat::SevenZip => compress_7z_streamed(inputs, format, password, &on_progress),
+        ArchiveFormat::Zip => {
+            compress_7z_file(inputs, archive_stem, format, password, &on_progress)
         }
-        ArchiveFormat::Rar => {
-            compress_with_rar(&archive_path, inputs, password)?;
-        }
+        ArchiveFormat::Rar => compress_rar_file(inputs, archive_stem, password, &on_progress),
     }
-
-    Ok(CompressResult {
-        path: archive_path,
-        format,
-    })
 }
 
-fn compress_with_7z(
-    archive_path: &Path,
+/// 7z in SevenZip format: pipe stdout directly into a `NamedTempFile` on Unix.
+/// This avoids the need for a pre-known output path and replaces size-polling
+/// with exact byte counting as data flows through.
+///
+/// On non-Unix platforms the function falls back to the file-based path used
+/// by Zip and RAR.
+fn compress_7z_streamed(
     inputs: &[PathBuf],
     format: ArchiveFormat,
     password: Option<&str>,
-) -> Result<()> {
+    on_progress: &dyn Fn(u64),
+) -> Result<CompressResult> {
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write};
+        use std::process::Stdio;
+
+        let bin = find_binary("7z").context(
+            "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
+        )?;
+
+        let mut cmd = Command::new(&bin);
+        cmd.arg("a")
+            .arg("-t7z")
+            .arg("-mx=0") // store mode: no compression
+            .arg("-bd") // no progress bar
+            .arg("-y"); // assume yes
+
+        if let Some(pass) = password {
+            cmd.arg(format!("-p{pass}"));
+            // -mhe=on encrypts archive headers, hiding internal file names.
+            cmd.arg("-mhe=on");
+        }
+
+        // /dev/stdout tells 7z to write the archive to its stdout fd, which
+        // we capture via Stdio::piped(). This eliminates the intermediate file
+        // on disk and lets us count bytes exactly as they arrive.
+        cmd.arg("/dev/stdout");
+        for input in inputs {
+            cmd.arg(input);
+        }
+        cmd.stdout(Stdio::piped());
+        // Inherit stderr so 7z error messages are visible to the user.
+        cmd.stderr(Stdio::inherit());
+
+        let mut child = cmd.spawn().context("spawning 7z")?;
+        let mut stdout = child.stdout.take().expect("stdout was piped");
+
+        let mut temp = tempfile::NamedTempFile::new().context("creating temp file for archive")?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let n = stdout.read(&mut buf).context("reading 7z output")?;
+            if n == 0 {
+                break;
+            }
+            temp.write_all(&buf[..n]).context("writing archive data")?;
+            total += n as u64;
+            on_progress(total);
+        }
+        // Drop the pipe before wait() so 7z is not blocked on a full buffer.
+        drop(stdout);
+
+        let status = child.wait().context("waiting for 7z")?;
+        if !status.success() {
+            bail!("`7z` exited with {status}");
+        }
+
+        let path = temp.path().to_path_buf();
+        Ok(CompressResult {
+            path,
+            format,
+            _cleanup: TempCleanup::File(temp),
+        })
+    }
+
+    // Non-Unix fallback: write to a temp directory the same way Zip does.
+    #[cfg(not(unix))]
+    compress_7z_file(inputs, "archive", format, password, on_progress)
+}
+
+/// 7z in Zip format (and the non-Unix SevenZip fallback): write to a temp
+/// directory so 7z can do the seeking the Zip format requires.
+fn compress_7z_file(
+    inputs: &[PathBuf],
+    archive_stem: &str,
+    format: ArchiveFormat,
+    password: Option<&str>,
+    on_progress: &dyn Fn(u64),
+) -> Result<CompressResult> {
     let bin = find_binary("7z").context(
         "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
     )?;
@@ -112,6 +196,11 @@ fn compress_with_7z(
         ArchiveFormat::Rar => unreachable!(),
     };
 
+    let temp_dir = tempfile::TempDir::new().context("creating temp dir for archive")?;
+    let archive_path = temp_dir
+        .path()
+        .join(format!("{}.{}", archive_stem, format.extension()));
+
     let mut cmd = Command::new(&bin);
     cmd.arg("a")
         .arg(type_flag)
@@ -121,29 +210,39 @@ fn compress_with_7z(
 
     if let Some(pass) = password {
         cmd.arg(format!("-p{pass}"));
-        // Encrypt archive headers too (hides internal file names).
-        // Only supported by 7z format; zip has no header encryption.
         if format == ArchiveFormat::SevenZip {
             cmd.arg("-mhe=on");
         }
     }
 
-    cmd.arg(archive_path);
+    cmd.arg(&archive_path);
     for input in inputs {
         cmd.arg(input);
     }
 
-    run_command(cmd, "7z")
+    run_command(cmd, "7z")?;
+
+    on_progress(archive_path.metadata().map(|m| m.len()).unwrap_or(0));
+
+    Ok(CompressResult {
+        path: archive_path,
+        format,
+        _cleanup: TempCleanup::Dir(temp_dir),
+    })
 }
 
-fn compress_with_rar(
-    archive_path: &Path,
+fn compress_rar_file(
     inputs: &[PathBuf],
+    archive_stem: &str,
     password: Option<&str>,
-) -> Result<()> {
+    on_progress: &dyn Fn(u64),
+) -> Result<CompressResult> {
     let bin = find_binary("rar").context(
         "rar not found in PATH; install the RAR CLI (not distributed with pesto due to licensing)",
     )?;
+
+    let temp_dir = tempfile::TempDir::new().context("creating temp dir for archive")?;
+    let archive_path = temp_dir.path().join(format!("{}.rar", archive_stem));
 
     let mut cmd = Command::new(&bin);
     cmd.arg("a")
@@ -156,12 +255,20 @@ fn compress_with_rar(
         cmd.arg(format!("-hp{pass}"));
     }
 
-    cmd.arg(archive_path);
+    cmd.arg(&archive_path);
     for input in inputs {
         cmd.arg(input);
     }
 
-    run_command(cmd, "rar")
+    run_command(cmd, "rar")?;
+
+    on_progress(archive_path.metadata().map(|m| m.len()).unwrap_or(0));
+
+    Ok(CompressResult {
+        path: archive_path,
+        format: ArchiveFormat::Rar,
+        _cleanup: TempCleanup::Dir(temp_dir),
+    })
 }
 
 pub fn find_binary(name: &str) -> Option<PathBuf> {
