@@ -176,6 +176,7 @@ pub fn compress_volumes(
         let mut current =
             tempfile::NamedTempFile::new().context("creating temp file for volume")?;
         let mut current_bytes: u64 = 0;
+        let mut total_bytes: u64 = 0;
 
         loop {
             let n = fifo.read(&mut buf).context("reading from FIFO")?;
@@ -207,8 +208,9 @@ pub fn compress_volumes(
                     .write_all(&chunk[..write_len])
                     .context("writing volume data")?;
                 current_bytes += write_len as u64;
+                total_bytes += write_len as u64;
                 chunk = &chunk[write_len..];
-                on_progress(current_bytes);
+                on_progress(total_bytes);
             }
         }
 
