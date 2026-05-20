@@ -86,11 +86,17 @@ fn main() {
 
     // Detect which paths are available at runtime.
     #[cfg(target_arch = "x86_64")]
-    let has_gfni = std::is_x86_feature_detected!("avx512f")
+    let has_gfni_512 = std::is_x86_feature_detected!("avx512f")
         && std::is_x86_feature_detected!("avx512bw")
         && std::is_x86_feature_detected!("gfni");
     #[cfg(not(target_arch = "x86_64"))]
-    let has_gfni = false;
+    let has_gfni_512 = false;
+
+    #[cfg(target_arch = "x86_64")]
+    let has_gfni_256 =
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_gfni_256 = false;
 
     #[cfg(target_arch = "x86_64")]
     let has_avx2 = std::is_x86_feature_detected!("avx2");
@@ -104,8 +110,9 @@ fn main() {
 
     println!("PAR2 encoder benchmark — slice {SLICE_SIZE} B — {threads} rayon thread(s)");
     println!(
-        "SIMD available: GFNI+AVX512={} | AVX2={} | SSSE3={} | scalar=always",
-        yn(has_gfni),
+        "SIMD available: GFNI+AVX512={} | GFNI+AVX2={} | AVX2={} | SSSE3={} | scalar=always",
+        yn(has_gfni_512),
+        yn(has_gfni_256),
         yn(has_avx2),
         yn(has_ssse3),
     );
@@ -136,14 +143,15 @@ fn main() {
 
     // Table header
     println!(
-        "{:<18}  {:>22}  {:>22}  {:>22}  {:>22}",
-        "scenario", "GFNI+AVX512", "AVX2", "SSSE3", "scalar"
+        "{:<18}  {:>22}  {:>22}  {:>22}  {:>22}  {:>22}",
+        "scenario", "GFNI+AVX512", "GFNI+AVX2", "AVX2", "SSSE3", "scalar"
     );
-    println!("{}", "-".repeat(114));
+    println!("{}", "-".repeat(138));
 
     #[cfg(target_arch = "x86_64")]
     let paths: &[(BenchPath, bool, &str)] = &[
-        (BenchPath::Avx512Gfni, has_gfni, "GFNI+AVX512"),
+        (BenchPath::Avx512Gfni, has_gfni_512, "GFNI+AVX512"),
+        (BenchPath::Avx2Gfni, has_gfni_256, "GFNI+AVX2"),
         (BenchPath::Avx2, has_avx2, "AVX2"),
         (BenchPath::Ssse3, has_ssse3, "SSSE3"),
         (BenchPath::Scalar, true, "scalar"),
@@ -175,7 +183,7 @@ fn main() {
 
     // Speedup table vs scalar baseline (only makes sense when multiple paths available).
     #[cfg(target_arch = "x86_64")]
-    if has_avx2 || has_ssse3 || has_gfni {
+    if has_avx2 || has_ssse3 || has_gfni_256 || has_gfni_512 {
         println!("Speedup vs scalar (GF madd rate, 256 MiB @ 10%):");
         let (_, scalar_madd) = measure(256, 10, BenchPath::Scalar);
         for (path, available, label) in paths {

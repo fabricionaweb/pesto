@@ -997,6 +997,131 @@ instructions — halves or quarters the load/store ratio.
 
 ---
 
+## Phase 25 — Beat parpar end-to-end throughput
+
+Baseline measurement on i5-14400 (16 threads, GFNI+AVX2, no AVX-512), `bench_pesto_vs_parpar.sh` with `--par2 10`:
+
+| File | Pesto MB/s | Parpar MB/s | Diff |
+|------|-----------:|------------:|------:|
+| 1G   | 480.8 | 581.2 | −17.3% |
+| 5G   | 491.6 | 580.0 | −15.2% |
+| 10G  | 496.7 | 483.1 | **+2.8%** |
+
+Internal SIMD bench (`cargo bench --features bench-internals`) shows the GFNI+AVX2 kernel at **1991–2348 MiB/s** on warm 64–256 MiB workloads — i.e. the RS math is ~4× faster than the end-to-end number. The bottleneck is the *pipeline* (stop-the-world flush, double copies, single reader), not the SIMD kernel. Pesto already wins on 10G because parpar runs into the same memory ceiling; the goal of this phase is to win on 1G and 5G too.
+
+Items are listed in order of expected win-per-effort.
+
+### 25Z — `flush_avx2_gfni` produces incorrect recovery data 🔴 (blocking)
+
+While running the existing `simd_recovery_matches_scalar_for_larger_slices` test as part of the Phase 25 checks, the AVX2+GFNI path (added in commit `7cf832e`) was found to produce recovery bytes that disagree with the scalar reference. Confirmed end-to-end with `par2cmdline`: a damaged file is *not* repairable from the generated set — "Found 13 of 14 data blocks. Repair Failed." The earlier "+2.8% win on 10G" against parpar was measured against mathematically wrong PAR2 output.
+
+- [x] Disabled the runtime auto-dispatch into `flush_avx2_gfni`; gated behind the new `par2-avx2-gfni-unsafe` Cargo feature so the fix can still be developed and benchmarked
+- [x] Added `#[allow(dead_code)]` on `Avx2GfniTable`, `flush_avx2_gfni`, `flush_avx2_gfni_work` to keep clippy clean while disabled
+- [ ] Diagnose the bug — likely candidates: `mat_lo`/`mat_hi` matrix layout (placing different matrices in the two qwords of each 128-bit lane), the `deint_mask` byte ordering, or the `unpacklo_epi8` re-interleave at the end
+- [ ] Add a smaller regression test that runs the AVX2+GFNI path directly via `BenchPath::Avx2Gfni` under `--features bench-internals` so the next attempt is iterated against a fast oracle
+- [ ] Re-enable runtime dispatch only after both unit and `par2 repair` round-trip pass
+
+### 25a — A/B `chunk_size` in `flush_avx2_gfni_work` ✅
+
+The working tree had lowered `chunk_size` from 16384 → 2048 (4 KiB) "to stay in L1". End-to-end measurement found this had no benefit and inflated the rayon task count 8×.
+
+- [x] Measured 2048 / 4096 / 8192 / 16384 with internal bench: numbers swing wildly between runs, no clear winner
+- [x] Measured end-to-end (1G/5G): 16384 wins on 5G by +1.7%, ties on 1G
+- [x] Restored 16384 in the AVX2 and AVX2+GFNI paths; SSSE3, AVX-512 and scalar were already at 16384
+
+### 25b — Restrict rayon to performance cores on hybrid CPUs ✅
+
+i5-14400 reports 16 logical threads (6P+HT + 4E). `configure_rayon` was already calling `.num_threads(physical_core_count())` (which returned 10 = 6P+4E), but E-cores execute AVX2 at lower throughput and stretch wall-clock for the longest partition. Quick A/B measured 6 threads (P-cores only) beats 10 threads on 5G by +2.4%.
+
+- [x] Added `performance_core_count()` that detects hybrid layout by scanning `/sys/devices/system/cpu/*/topology/thread_siblings_list` — P-cores expose two siblings, E-cores stand alone
+- [x] Falls back to `physical_core_count()` on non-hybrid or non-Linux systems
+- [x] Wired into `configure_rayon` and the `Par2EncodeStarted` `threads` event
+- [x] Measured on i5-14400: P-cores only is faster than physical core count by ~2% on 5G
+
+### 25c — Recycle queued slice buffers ✅
+
+`feed_par2_slice` was allocating a fresh `Vec::with_capacity(par2_slice_size)` per slice (~1024 allocations per 1G file). After `flush()` consumed the queue, those allocations were dropped — pure churn.
+
+- [x] Added `free_buffers: Vec<Vec<u8>>` to `RecoveryEncoder`
+- [x] Replaced `self.queued_slices = queued; self.queued_slices.clear();` with `self.recycle_queue(queued)` in all six flush paths (AVX2, AVX2+GFNI, AVX-512+GFNI, SSSE3, NEON, scalar)
+- [x] Added public `take_buffer()` that pops from the pool or allocates fresh; `feed_par2_slice` uses it for the replacement buffer, and the per-file `par2_accum` is also primed from the pool
+- [x] No measurable end-to-end win on its own (allocator already fast on Linux), but eliminates ~99 % of slice-buffer allocations and is a precondition for the background-flush worker in 25f where allocation ownership matters
+
+### 25d — Profile with `perf stat` before bigger work (easy, 30 min)
+
+Confirm the pipeline-bound hypothesis before investing in the channel/double-buffer refactor.
+
+- [ ] `perf stat -e cycles,instructions,L1-dcache-load-misses,LLC-load-misses,dTLB-load-misses,task-clock ./target/release/pesto --par2-only --par2 10 file5G.bin`
+- [ ] Same for `parpar`
+- [ ] Compare cycles-per-byte, LLC miss rate, and `task-clock`/wall ratio (utilization). Decide whether to prioritize 25e (CPU compute) or 25f (I/O overlap)
+- [ ] Drop-caches the bench script between runs (uncomment the `drop_caches` line, or use `vmtouch -e` to evict)
+
+### 25e — 8-way recovery unroll for AVX2+GFNI (medium, half day)
+
+The GFNI inner loop uses 2 matrix registers per recovery block × 4-way unroll = 8 ymm regs, plus mask/deint constants and 4 in-flight accumulators. We still have headroom for 8-way (halves the per-byte input-load + nibble overhead).
+
+- [ ] Add an `[buf_a..buf_h]` arm in the `par_chunks_mut` match
+- [ ] Spill cleanly: prefer `par_chunks_mut(8)` only when `n_rec % 8 == 0`, otherwise fall through to existing 4/2/1 arms
+- [ ] Verify via `cargo bench --features bench-internals` that throughput improves at 64 MiB (compute-bound) before checking end-to-end
+
+### 25f — Background flush worker (medium, half day) — **largest expected end-to-end win**
+
+`flush()` currently runs to completion inline; the tokio reader is blocked via `block_in_place` for the entire flush. On a 1 GB file we flush ~8 times serially with reads.
+
+- [ ] Spawn a long-lived rayon task that owns the buffers and consumes from a bounded `crossbeam_channel` (depth = 2 batches)
+- [ ] `add_slice` becomes a non-blocking send; full channel back-pressures the reader naturally
+- [ ] Convert `finish()` to drain the channel + join the worker
+- [ ] Keep current single-thread path under a feature flag during validation
+- [ ] Target: lift 1G/5G from ~490 MB/s towards the 1700+ MB/s SIMD ceiling, capped by disk read
+
+### 25g — Skip the article-buffer round trip in `--par2-only` (medium, half day)
+
+In `--par2-only` mode, articles are produced only to feed `par2_accum`, then released. The `extend_from_slice` is a redundant pass over the input.
+
+- [ ] When `tx_opt.is_none()` (par2-only), bypass the article reader and use a dedicated reader that `pread`s directly into pooled `par2_slice_size` buffers
+- [ ] Skip yEnc segmentation entirely on this path (segments are still needed for slice geometry; compute lengths without producing data)
+- [ ] Verify zero behavioural change vs current path with a byte-for-byte PAR2 diff on a 1G test file
+
+### 25h — Double-buffered queue (medium, half day)
+
+Even with 25f's background worker, a single in-flight batch still leaves the reader idle when the channel is full and the worker is mid-flush. Two batches alternate.
+
+- [ ] Worker owns 2 buffer-vectors; while it processes batch A, batch B fills
+- [ ] Requires 25f landed first
+- [ ] Measure separately to confirm the second buffer pays for itself
+
+### 25i — Concurrent per-file readers (medium, 1 day)
+
+The producer reads files strictly sequentially. With multiple input files (and even within a single large file), reads can overlap.
+
+- [ ] Multi-file: spawn up to N concurrent reader tasks, merge in file-order via a small reorder buffer keyed on slice index
+- [ ] Single file: split the file into 2 ranges and read with `pread` in parallel, with a small reorder window for slice ordering
+- [ ] Cap by memory limit (each in-flight reader consumes `~par2_slice_size`)
+
+### 25j — Aligned recovery buffers (small, 1–2 h)
+
+`Vec<u16>` currently has 2-byte alignment; the SIMD path uses `loadu/storeu`. With 32- or 64-byte alignment we can switch to aligned variants.
+
+- [ ] Replace `vec![0u16; slice_words]` with an aligned allocator (e.g. `aligned-vec` crate or hand-rolled `alloc::Layout`)
+- [ ] Swap `_mm256_loadu_si256` / `_mm256_storeu_si256` on the recovery-buffer side to aligned versions in the AVX2/AVX2+GFNI paths
+- [ ] Re-measure; expected gain is small (<3%) but free
+
+### 25k — Improve the benchmark harness (small, 30 min)
+
+The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominated by warm-up).
+
+- [ ] Run each tool 3× per file and report the median
+- [ ] Drop OS caches between runs (`vmtouch -e <file>` works without sudo)
+- [ ] Report wall, user, sys separately so we can spot CPU-utilization regressions
+
+### Definition of done
+
+- [ ] On the same hardware, `bench_pesto_vs_parpar.sh` reports `Pesto ≥ Parpar` for 1G, 5G *and* 10G
+- [ ] Internal SIMD bench numbers do not regress vs `7cf832e`
+- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` all clean
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
