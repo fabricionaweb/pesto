@@ -55,10 +55,11 @@ impl std::fmt::Display for ArchiveFormat {
 // Fields exist solely to keep the temp storage alive until this value is dropped.
 #[allow(dead_code)]
 enum TempCleanup {
-    /// The archive was streamed directly into this named temp file.
-    File(tempfile::NamedTempFile),
     /// The archive was written by an external tool into this temp directory.
     Dir(tempfile::TempDir),
+    /// The archive is one of several volume files in a shared temp directory.
+    /// The directory is deleted when the last volume holding this Arc is dropped.
+    SharedDir(std::sync::Arc<tempfile::TempDir>),
 }
 
 /// Result of a compression run. Owns its temp storage; the archive file is
@@ -98,15 +99,15 @@ pub fn compress(
 
 /// Split a 7z-format archive into volumes of at most `volume_size` bytes.
 ///
-/// A named pipe (FIFO) is used as the 7z output path so the archive stream
-/// can be split into [`NamedTempFile`] volumes purely in software as bytes
-/// arrive, without waiting for the full archive to be written first.
+/// Uses 7z's native `-v` flag so the tool handles all seeking requirements
+/// internally. The volume files are written to a shared temp directory and
+/// passed to `on_volume` in order once compression completes.
 ///
-/// Only supported for [`ArchiveFormat::SevenZip`] on Unix. Returns an error
-/// on other platforms or formats.
+/// Only supported for [`ArchiveFormat::SevenZip`]. Returns an error for
+/// other formats.
 ///
-/// `on_progress` is called after each write with bytes written to the current
-/// volume so far.
+/// `on_progress` is called every ~200 ms with the total bytes written across
+/// all volume files so far.
 pub fn compress_volumes(
     inputs: &[PathBuf],
     format: ArchiveFormat,
@@ -118,120 +119,67 @@ pub fn compress_volumes(
     if format != ArchiveFormat::SevenZip {
         anyhow::bail!("--volume-size is only supported with the 7z format (got `{format}`)");
     }
-    #[cfg(not(unix))]
-    {
+
+    let bin = find_binary("7z").context(
+        "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
+    )?;
+
+    let temp_dir =
+        std::sync::Arc::new(tempfile::TempDir::new().context("creating temp dir for volumes")?);
+    // 7z appends .001, .002, … to this base path.
+    let archive_base = temp_dir.path().join("archive.7z");
+
+    let mut cmd = Command::new(&bin);
+    cmd.arg("a")
+        .arg("-t7z")
+        .arg("-mx=0") // store mode: no compression
+        .arg("-bd") // no progress bar
+        .arg("-y") // assume yes
+        .arg(format!("-v{volume_size}b")); // native volume splitting
+
+    if let Some(pass) = password {
+        cmd.arg(format!("-p{pass}"));
+        cmd.arg("-mhe=on");
+    }
+
+    cmd.arg(&archive_base);
+    for input in inputs {
+        cmd.arg(input);
+    }
+
+    // Poll total size of all volume files in the temp dir while 7z runs.
+    run_with_progress_dir(cmd, "7z", temp_dir.path(), &on_progress)?;
+
+    // Collect volume files in sorted order (archive.7z.001, .002, …).
+    let mut volumes: Vec<PathBuf> = std::fs::read_dir(temp_dir.path())
+        .context("reading temp dir")?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("archive.7z"))
+                .unwrap_or(false)
+        })
+        .collect();
+    volumes.sort();
+
+    if volumes.is_empty() {
         anyhow::bail!(
-            "--volume-size requires Unix (named pipes are not available on this platform)"
+            "7z produced no output files in {}",
+            temp_dir.path().display()
         );
     }
-    #[cfg(unix)]
-    {
-        use std::io::{Read, Write};
-        use std::process::Stdio;
 
-        let bin = find_binary("7z").context(
-            "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
-        )?;
-
-        // Create a named pipe that 7z writes into. We read from the other end
-        // and split the stream into fixed-size volumes.
-        let pipe_dir = tempfile::TempDir::new().context("creating temp dir for FIFO")?;
-        let fifo_path = pipe_dir.path().join("archive.7z");
-        let status = Command::new("mkfifo")
-            .arg(&fifo_path)
-            .status()
-            .context("running mkfifo")?;
-        if !status.success() {
-            anyhow::bail!("mkfifo failed with {status}");
-        }
-
-        let mut cmd = Command::new(&bin);
-        cmd.arg("a")
-            .arg("-t7z")
-            .arg("-mx=0") // store mode: no compression
-            .arg("-bd") // no progress bar
-            .arg("-y"); // assume yes
-
-        if let Some(pass) = password {
-            cmd.arg(format!("-p{pass}"));
-            cmd.arg("-mhe=on");
-        }
-
-        cmd.arg(&fifo_path);
-        for input in inputs {
-            cmd.arg(input);
-        }
-        // 7z writes to the FIFO; we don't need to capture its stdout.
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::inherit());
-
-        // Spawn 7z before opening the FIFO for reading — a FIFO open blocks
-        // until both ends are open, so the writer must be alive first.
-        let mut child = cmd.spawn().context("spawning 7z")?;
-
-        // Opening the FIFO for reading unblocks the 7z writer.
-        let mut fifo = std::fs::File::open(&fifo_path).context("opening FIFO for reading")?;
-
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut current =
-            tempfile::NamedTempFile::new().context("creating temp file for volume")?;
-        let mut current_bytes: u64 = 0;
-        let mut total_bytes: u64 = 0;
-
-        loop {
-            let n = fifo.read(&mut buf).context("reading from FIFO")?;
-            if n == 0 {
-                break;
-            }
-            let mut chunk = &buf[..n];
-
-            // Split the chunk across volume boundaries as needed.
-            while !chunk.is_empty() {
-                let space = volume_size.saturating_sub(current_bytes);
-                if space == 0 {
-                    // Current volume is full — seal it and open a new one.
-                    let next =
-                        tempfile::NamedTempFile::new().context("creating temp file for volume")?;
-                    let sealed = std::mem::replace(&mut current, next);
-                    let path = sealed.path().to_path_buf();
-                    on_volume(CompressResult {
-                        path,
-                        format,
-                        _cleanup: TempCleanup::File(sealed),
-                    })?;
-                    current_bytes = 0;
-                    continue; // re-check space with new volume
-                }
-
-                let write_len = (space as usize).min(chunk.len());
-                current
-                    .write_all(&chunk[..write_len])
-                    .context("writing volume data")?;
-                current_bytes += write_len as u64;
-                total_bytes += write_len as u64;
-                chunk = &chunk[write_len..];
-                on_progress(total_bytes);
-            }
-        }
-
-        drop(fifo);
-        let status = child.wait().context("waiting for 7z")?;
-        if !status.success() {
-            anyhow::bail!("`7z` exited with {status}");
-        }
-
-        // Seal the final (possibly partial) volume.
-        if current_bytes > 0 {
-            let path = current.path().to_path_buf();
-            on_volume(CompressResult {
-                path,
-                format,
-                _cleanup: TempCleanup::File(current),
-            })?;
-        }
-
-        Ok(())
+    for path in volumes {
+        let dir = std::sync::Arc::clone(&temp_dir);
+        on_volume(CompressResult {
+            path,
+            format,
+            _cleanup: TempCleanup::SharedDir(dir),
+        })?;
     }
+
+    Ok(())
 }
 
 /// 7z in SevenZip format: write to a `NamedTempFile` inside a `TempDir`.
@@ -348,6 +296,69 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Sum the sizes of all files directly inside `dir`.
+fn dir_total_size(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Spawn `cmd`, poll the total size of all files in `output_dir` every 200 ms,
+/// and call `on_progress` so the UI stays live during multi-volume compression.
+fn run_with_progress_dir(
+    mut cmd: Command,
+    tool: &str,
+    output_dir: &std::path::Path,
+    on_progress: &dyn Fn(u64),
+) -> Result<()> {
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("spawning `{tool}`"))?;
+
+    loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("waiting for `{tool}`"))?
+        {
+            Some(status) => {
+                on_progress(dir_total_size(output_dir));
+                if !status.success() {
+                    let detail = child
+                        .stderr
+                        .as_mut()
+                        .and_then(|s| {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            s.read_to_string(&mut buf).ok()?;
+                            Some(buf)
+                        })
+                        .unwrap_or_default();
+                    bail!(
+                        "`{tool}` exited with {status}{}",
+                        if detail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", detail.trim())
+                        }
+                    );
+                }
+                return Ok(());
+            }
+            None => {
+                on_progress(dir_total_size(output_dir));
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+}
+
 /// Spawn `cmd`, poll `output_path` file size every 200 ms until the process
 /// exits, and call `on_progress` after each poll so the UI stays live.
 fn run_with_progress(
@@ -441,7 +452,6 @@ mod tests {
 
     #[test]
     fn random_passwords_are_not_identical() {
-        // Two calls in the same process should differ (LCG advances seed).
         let a = random_password();
         let b = random_password();
         assert_ne!(a, b);
@@ -458,5 +468,172 @@ mod tests {
             assert_eq!(expected.extension(), *s);
         }
         assert_eq!(ArchiveFormat::parse("tar"), None);
+    }
+
+    // ── compress_volumes tests ────────────────────────────────────────────────
+
+    fn needs_7z() -> bool {
+        find_binary("7z").is_some()
+    }
+
+    /// Write `size` bytes of a repeating pattern to `path`.
+    fn write_test_file(path: &std::path::Path, size: usize) {
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        std::fs::write(path, &data).unwrap();
+    }
+
+    #[test]
+    fn compress_volumes_rejects_non_7z_format() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("f.bin");
+        write_test_file(&input, 1024);
+        let err = compress_volumes(&[input], ArchiveFormat::Zip, None, 512, |_| Ok(()), |_| {});
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("7z format"));
+    }
+
+    #[test]
+    fn compress_volumes_single_volume_when_content_fits() {
+        if !needs_7z() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("small.bin");
+        write_test_file(&input, 1024);
+
+        // Keep CompressResults alive — dropping them releases the shared TempDir.
+        let mut results: Vec<CompressResult> = Vec::new();
+        compress_volumes(
+            &[input],
+            ArchiveFormat::SevenZip,
+            None,
+            10 * 1024 * 1024, // 10 MiB limit — much larger than the file
+            |vol| {
+                results.push(vol);
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1, "expected 1 volume, got {}", results.len());
+        assert!(
+            results[0].path.exists(),
+            "volume file must exist while result is alive"
+        );
+        assert!(results[0].path.metadata().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn compress_volumes_splits_into_multiple_volumes() {
+        if !needs_7z() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Two 1 MiB files; volumes capped at 600 KiB → must produce ≥ 3 volumes.
+        let f1 = tmp.path().join("a.bin");
+        let f2 = tmp.path().join("b.bin");
+        write_test_file(&f1, 1024 * 1024);
+        write_test_file(&f2, 1024 * 1024);
+
+        let mut results: Vec<CompressResult> = Vec::new();
+        compress_volumes(
+            &[f1, f2],
+            ArchiveFormat::SevenZip,
+            None,
+            600 * 1024,
+            |vol| {
+                assert!(
+                    vol.path.exists(),
+                    "volume path must exist when on_volume fires"
+                );
+                assert!(vol.path.metadata().unwrap().len() > 0);
+                results.push(vol);
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(
+            results.len() >= 3,
+            "expected ≥ 3 volumes for 2×1 MiB with 600 KiB limit, got {}",
+            results.len()
+        );
+
+        // All volumes while still alive must be readable.
+        for r in &results {
+            let size = r.path.metadata().unwrap().len();
+            assert!(size > 0, "volume {:?} is empty", r.path);
+        }
+    }
+
+    #[test]
+    fn compress_volumes_progress_is_reported_and_non_decreasing() {
+        if !needs_7z() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.bin");
+        write_test_file(&input, 2 * 1024 * 1024);
+
+        let progress = std::sync::Mutex::new(Vec::<u64>::new());
+        compress_volumes(
+            &[input],
+            ArchiveFormat::SevenZip,
+            None,
+            1024 * 1024,
+            |_| Ok(()),
+            |bytes| progress.lock().unwrap().push(bytes),
+        )
+        .unwrap();
+
+        let ticks = progress.into_inner().unwrap();
+        assert!(
+            !ticks.is_empty(),
+            "on_progress must be called at least once"
+        );
+        assert!(*ticks.last().unwrap() > 0, "final progress must be > 0");
+        // Values must be non-decreasing.
+        for w in ticks.windows(2) {
+            assert!(w[1] >= w[0], "progress went backwards: {} → {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn compress_volumes_volumes_are_valid_7z_archives() {
+        if !needs_7z() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.bin");
+        write_test_file(&input, 2 * 1024 * 1024);
+
+        let mut vol_paths: Vec<PathBuf> = Vec::new();
+        // Keep results alive so temp storage is not dropped.
+        let mut results: Vec<CompressResult> = Vec::new();
+        compress_volumes(
+            &[input],
+            ArchiveFormat::SevenZip,
+            None,
+            1024 * 1024,
+            |vol| {
+                vol_paths.push(vol.path.clone());
+                results.push(vol);
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        // 7z l (list) on the first volume must succeed — validates the archive header.
+        let status = Command::new("7z")
+            .arg("l")
+            .arg(&vol_paths[0])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "7z l failed on first volume");
     }
 }
