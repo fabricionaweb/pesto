@@ -610,7 +610,8 @@ fluctuations are visible without any external tool.
 - [x] `render_sparkline(samples) -> String` maps each sample to one of
       ` ▁▂▃▄▅▆▇█` proportional to the max in the window
 - [x] Displayed on the right side of the speed line: `12.3 MiB/s ▁▃▅▇█▆▄▂▃█`
-- [ ] Degrades gracefully to nothing when terminal is < 60 columns
+- [x] Degrades gracefully to nothing when terminal is < 60 columns
+      (`terminal_width()` via `TIOCGWINSZ`; suppressed on non-TTY or failure)
 
 ### 21d — Confidence-based ETA ✅ (priority 4)
 
@@ -1142,7 +1143,7 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 11. **Pipelined Volume Streaming (The "RAR Volumes" Idea):** Stream archive volumes (`.part01.rar`) from the compressor directly into the NNTP upload queue as soon as each volume is flushed to disk, instead of waiting for the entire archive to finish.
 12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files.
 13. **On-the-fly TAR Bundling:** Bundle directories into a tar stream dynamically during the read pass, eliminating the need for a temporary archive step.
-14. **Stdin Pipelining:** ✅ Implemented in Phase 23a. `-` is accepted as a file argument; data is buffered to a named temp file.
+14. ~~**Stdin Pipelining:** Implemented in Phase 23a. `-` is accepted as a file argument; data is buffered to a named temp file.~~ ✅ **See Phase 23a**
 15. **Eager PAR2 Processing in Watch Mode:** In `--watch` mode, start hashing and computing PAR2 blocks as soon as a file is detected, before the upload queue is ready.
 16. **Async Backpressure:** Ensure that the compression/PAR2 stages block properly if the network layer stalls, preventing buffer bloat.
 17. **Chunked/Live Uploading:** Support infinite data streams (like live video), producing a continuous sequence of NZBs or a dynamically updating NZB.
@@ -1151,21 +1152,21 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 20. **Zero-Copy yEnc:** Optimize buffer handling to zero-copy levels using advanced scatter-gather I/O.
 
 ### C. Visual Feedback & Terminal UX
-21. **Interactive TUI Mode:** A `ratatui`-based dashboard showing real-time graphs of upload speed, memory usage, and thread activity.
-22. **Sparkline Metrics:** Add mini Unicode sparklines (e.g., ` ▂▃▅▆▇`) to the CLI output to show network throughput over the last 10 seconds.
-23. **Buffer Pool Visualizer:** Display a small visual indicator of free vs. in-use memory buffers to show the health of the internal pipeline.
-24. **Adaptive Refresh Rate:** Lower the terminal redraw rate dynamically when the CPU is bogged down, keeping resources focused on the upload.
-25. **Color-Coded Status Matrix:** Show a grid representing NNTP worker states (🟢 Uploading, 🟡 Authenticating, 🔴 Retrying, ⚪ Idle).
-26. **Confidence-Based ETA:** Display ETA as a range (e.g., `12-15 min`) or add a stability indicator if throughput is fluctuating heavily.
-27. **Directory Tree Preview:** Print a clean `tree`-style breakdown of the payload during the pre-flight summary before uploading.
-28. **Quiet / Minimal Mode:** A mode showing *only* a single spinning character and ETA, minimizing terminal pollution for tmux/screen users.
-29. **Audible / ANSI Bell Notifications:** Optionally trigger a terminal bell (`\a`) on completion for users without desktop notification integrations.
-30. **Smooth Progress Transitions:** Use sub-character block rendering (e.g., `▏▎▍▌▋▊▉█`) for ultra-smooth progress bars.
+21. **Interactive TUI Mode:** A `ratatui`-based dashboard showing real-time graphs of upload speed, memory usage, and thread activity. *(See Phase 21j)*
+22. ~~**Sparkline Metrics:**~~ ✅ Add mini Unicode sparklines (e.g., ` ▂▃▅▆▇`) to the CLI output to show network throughput over the last 10 seconds. *(Implemented in Phase 21c)*
+23. ~~**Buffer Pool Visualizer:**~~ ✅ Display a small visual indicator of free vs. in-use memory buffers to show the health of the internal pipeline. *(Implemented in Phase 21h)*
+24. ~~**Adaptive Refresh Rate:**~~ ✅ Lower the terminal redraw rate dynamically when the CPU is bogged down, keeping resources focused on the upload. *(Implemented in Phase 21i)*
+25. ~~**Color-Coded Status Matrix:**~~ ✅ Show a grid representing NNTP worker states (🟢 Uploading, 🟡 Authenticating, 🔴 Retrying, ⚪ Idle). *(Implemented in Phase 21b)*
+26. ~~**Confidence-Based ETA:**~~ ✅ Display ETA as a range (e.g., `12-15 min`) or add a stability indicator if throughput is fluctuating heavily. *(Implemented in Phase 21d)*
+27. ~~**Directory Tree Preview:**~~ ✅ Print a clean `tree`-style breakdown of the payload during the pre-flight summary before uploading. *(Implemented in Phase 21e)*
+28. ~~**Quiet / Minimal Mode:**~~ ✅ A mode showing *only* a single spinning character and ETA, minimizing terminal pollution for tmux/screen users. *(Implemented in Phase 21f)*
+29. ~~**Audible / ANSI Bell Notifications:**~~ ✅ Optionally trigger a terminal bell (`\a`) on completion for users without desktop notification integrations. *(Implemented in Phase 21g)*
+30. ~~**Smooth Progress Transitions:**~~ ✅ Use sub-character block rendering (e.g., `▏▎▍▌▋▊▉█`) for ultra-smooth progress bars. *(Implemented in Phase 21a)*
 
 ### D. Performance & Concurrency
 31. **SIMD yEnc Acceleration:** Implement AVX2/NEON intrinsics for the yEnc encoding loop, pushing encoding speeds to memory-bandwidth limits.
 32. **TCP `SO_RCVBUF`/`SO_SNDBUF` Tuning:** Auto-tune socket buffers for Long Fat Networks (LFNs) to maximize throughput over high-latency connections.
-33. **Hardware-Accelerated CRC32:** Use `CRC32c` or ARM CRC instructions if supported by the CPU, falling back to software.
+33. ~~**Hardware-Accelerated CRC32:**~~ ✅ Use `CRC32c` or ARM CRC instructions if supported by the CPU, falling back to software. *(Implemented in Phase 24g, commit: "perf: optimize PAR2 encoder with hardware-accelerated CRC32, 4x unrolling and prefetching")*
 34. **GPU-Accelerated PAR2:** Experimental CUDA/Vulkan backend for computing PAR2 recovery data on massive files almost instantly.
 35. **Connection Reuse Across Jobs:** In `--each` mode, keep the NNTP connection pool alive between files to skip TLS handshake overhead.
 36. **NNTP Command Pipelining:** Send multiple `POST` commands back-to-back without waiting for the server's response, if the server supports it.

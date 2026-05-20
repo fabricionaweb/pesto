@@ -1002,7 +1002,10 @@ impl RenderState {
                 // While uploading: bytes/total · instantaneous speed · sparkline
                 let spark = {
                     let samples = self.speed_samples();
-                    if samples.len() >= 2 {
+                    // Suppress sparkline on narrow terminals (< 60 columns) to
+                    // avoid truncating the speed/size figures that matter more.
+                    let wide_enough = terminal_width().is_none_or(|w| w >= 60);
+                    if samples.len() >= 2 && wide_enough {
                         format!(" {}", render_sparkline(&samples))
                     } else {
                         String::new()
@@ -1411,6 +1414,54 @@ fn render_sparkline(samples: &[f64]) -> String {
             SPARK[idx.min(8)]
         })
         .collect()
+}
+
+/// Returns the terminal column count queried via `TIOCGWINSZ`, or `None` on
+/// non-TTY fds or if the query fails.
+#[cfg(unix)]
+fn terminal_width() -> Option<usize> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+
+    extern "C" {
+        fn ioctl(
+            fd: std::ffi::c_int,
+            request: std::ffi::c_ulong,
+            out: *mut Winsize,
+        ) -> std::ffi::c_int;
+    }
+
+    // TIOCGWINSZ: Linux = 0x5413, macOS = 0x40087468
+    #[cfg(target_os = "linux")]
+    const TIOCGWINSZ: std::ffi::c_ulong = 0x5413;
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: std::ffi::c_ulong = 0x4008_7468;
+
+    let mut ws = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // Safety: ioctl(TIOCGWINSZ) writes exactly sizeof(Winsize) bytes into `ws`.
+    let ret = unsafe { ioctl(std::io::stderr().as_raw_fd(), TIOCGWINSZ, &mut ws) };
+    if ret == 0 && ws.ws_col > 0 {
+        Some(ws.ws_col as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn terminal_width() -> Option<usize> {
+    None
 }
 
 /// Returns true when ANSI colour should be used (TTY + NO_COLOR not set).
