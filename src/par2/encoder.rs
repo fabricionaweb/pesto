@@ -23,7 +23,10 @@ const HEAD_LEN: usize = 16 * 1024;
 
 /// Pre-computed AVX-512/GFNI coefficient table for one (recovery_block, input_slice) pair.
 /// Two 512-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
+))]
 type Avx512GfniTable = (__m512i, __m512i, [u16; 256], [u16; 256]);
 
 /// Pre-computed AVX2/GFNI coefficient table for one (recovery_block, input_slice) pair.
@@ -271,7 +274,10 @@ impl RecoveryEncoder {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
+        // Both GFNI paths are disabled in production until correctness is
+        // confirmed on real GFNI hardware (gfni_recovery_matches_scalar test).
+        // Enable with --features par2-avx2-gfni-unsafe for testing only.
+        #[cfg(all(target_arch = "x86_64", feature = "par2-avx2-gfni-unsafe"))]
         if std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512bw")
             && std::is_x86_feature_detected!("gfni")
@@ -282,12 +288,6 @@ impl RecoveryEncoder {
             return;
         }
 
-        // TODO(par2/avx2_gfni): this path produces incorrect recovery data —
-        // par2cmdline cannot repair a damaged file using the resulting set, and
-        // the `simd_recovery_matches_scalar_for_larger_slices` test fails when
-        // it is exercised. Disabled until the GF affine matrix construction (or
-        // the de-interleave/unpack order) is fixed. The function is still
-        // reachable via `BenchPath::Avx2Gfni` so the fix can be benchmarked.
         #[cfg(all(target_arch = "x86_64", feature = "par2-avx2-gfni-unsafe"))]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
             unsafe {
@@ -1437,7 +1437,10 @@ impl RecoveryEncoder {
     ///   3. Fold the two qword results within each lane (bsrli + xor) to produce
     ///      the combined lo and hi result bytes.
     ///   4. Re-interleave with `vunpcklbw` and XOR into the recovery buffer.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_gfni(&mut self) {
         let start_index = self.next_index;
@@ -1481,7 +1484,10 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_gfni_work(
         buffers: &mut [Vec<u16>],
