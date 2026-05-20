@@ -1141,7 +1141,7 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 
 ### B. Pipelined Processing & Archiving (Streaming)
 11. **Pipelined Volume Streaming (The "RAR Volumes" Idea):** Stream archive volumes (`.part01.rar`) from the compressor directly into the NNTP upload queue as soon as each volume is flushed to disk, instead of waiting for the entire archive to finish.
-12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files.
+12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files. Until a streaming pipeline (item 11 / Phase 25f) is built, the right approach is to invoke the system `7z` binary via `std::process::Command` with stdout piped — this eliminates the need for an intermediate file on disk and keeps the integration simple. A native Rust implementation only pays off when the full "generate volume N → post volume N → generate volume N+1" overlap is being built; the `Archiver` trait in `src/compress.rs` should be kept as a seam so the backend can be swapped without touching the rest of the pipeline.
 13. **On-the-fly TAR Bundling:** Bundle directories into a tar stream dynamically during the read pass, eliminating the need for a temporary archive step.
 14. ~~**Stdin Pipelining:** Implemented in Phase 23a. `-` is accepted as a file argument; data is buffered to a named temp file.~~ ✅ **See Phase 23a**
 15. **Eager PAR2 Processing in Watch Mode:** In `--watch` mode, start hashing and computing PAR2 blocks as soon as a file is detected, before the upload queue is ready.
