@@ -143,7 +143,7 @@ pub fn compress_volumes(
             cmd.arg("-mhe=on");
         }
 
-        cmd.arg("/dev/stdout");
+        cmd.arg("-so").arg("archive.7z");
         for input in inputs {
             cmd.arg(input);
         }
@@ -247,10 +247,9 @@ fn compress_7z_streamed(
             cmd.arg("-mhe=on");
         }
 
-        // /dev/stdout tells 7z to write the archive to its stdout fd, which
-        // we capture via Stdio::piped(). This eliminates the intermediate file
-        // on disk and lets us count bytes exactly as they arrive.
-        cmd.arg("/dev/stdout");
+        // -so tells 7z to write the archive to stdout; the dummy name is used
+        // only for internal 7z metadata, no file is created on disk.
+        cmd.arg("-so").arg("archive.7z");
         for input in inputs {
             cmd.arg(input);
         }
