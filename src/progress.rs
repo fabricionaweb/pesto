@@ -968,32 +968,6 @@ impl RenderState {
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
         }
 
-        // --- PAR2 encode progress bar (secondary; only while active, hidden on final draw) ---
-        if !final_draw
-            && self.par2_encode_total > 0
-            && self.par2_encode_done < self.par2_encode_total
-        {
-            let elapsed = self.par2_encode_start.elapsed().as_secs_f64().max(0.001);
-            let frac =
-                (self.par2_encode_done as f64 / self.par2_encode_total as f64).clamp(0.0, 1.0);
-            let pct = (frac * 100.0).round() as u64;
-            let bar = render_bar(frac, 22);
-            let rate = self.par2_encode_done as f64 / elapsed; // slices/s
-            let eta_str = if rate > 0.01 && self.par2_encode_done < self.par2_encode_total {
-                let remaining = (self.par2_encode_total - self.par2_encode_done) as f64 / rate;
-                format!(" · ETA {}", format_duration(remaining))
-            } else {
-                String::new()
-            };
-            lines.push(ansi(
-                &format!(
-                    "  par2 encode  [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
-                    self.par2_encode_done, self.par2_encode_total,
-                ),
-                "2",
-            ));
-        }
-
         // --- overall posting box (only after posting has started) --------
         if !self.files.is_empty() {
             let frac = if self.total_bytes > 0 {
@@ -1114,7 +1088,33 @@ impl RenderState {
             }
         }
 
-        // --- PAR2 recovery slice writing progress (secondary; hidden on final draw) ---
+        // --- PAR2 secondary indicators (encode + write + info), all dim/indented ---
+        // Shown below the upload box so the upload bar stays the focal point.
+        if !final_draw
+            && self.par2_encode_total > 0
+            && self.par2_encode_done < self.par2_encode_total
+        {
+            let elapsed = self.par2_encode_start.elapsed().as_secs_f64().max(0.001);
+            let frac =
+                (self.par2_encode_done as f64 / self.par2_encode_total as f64).clamp(0.0, 1.0);
+            let pct = (frac * 100.0).round() as u64;
+            let bar = render_bar(frac, 22);
+            let rate = self.par2_encode_done as f64 / elapsed;
+            let eta_str = if rate > 0.01 && self.par2_encode_done < self.par2_encode_total {
+                let remaining = (self.par2_encode_total - self.par2_encode_done) as f64 / rate;
+                format!(" · ETA {}", format_duration(remaining))
+            } else {
+                String::new()
+            };
+            lines.push(ansi(
+                &format!(
+                    "  par2 encode  [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
+                    self.par2_encode_done, self.par2_encode_total,
+                ),
+                "2",
+            ));
+        }
+
         if !final_draw && self.par2_write_active {
             let elapsed = self.par2_write_start.elapsed().as_secs_f64().max(0.001);
             let frac = if self.par2_write_total > 0 {
@@ -1139,7 +1139,6 @@ impl RenderState {
             ));
         }
 
-        // --- PAR2 encode info block (shown only while actively encoding) ---
         if !final_draw && self.par2_encode_done < self.par2_encode_total {
             if let Some(ref info) = self.par2_info {
                 let input_str = format!(
@@ -1164,15 +1163,18 @@ impl RenderState {
                     format_size(info.chunk_size as u64),
                 );
                 let mem_str = format_size(info.memory_limit as u64);
-                lines.push(ansi("PAR2 encoder", "36"));
-                lines.push(format!("  Input data      : {input_str}"));
-                lines.push(format!("  Recovery data   : {recovery_str}"));
-                lines.push(format!("  Input pass(es)  : {passes_str}"));
-                lines.push(format!(
-                    "  Multiply method : {} · {} threads",
-                    info.simd_method, info.threads
+                lines.push(ansi("  PAR2 encoder", "2"));
+                lines.push(ansi(&format!("    Input data      : {input_str}"), "2"));
+                lines.push(ansi(&format!("    Recovery data   : {recovery_str}"), "2"));
+                lines.push(ansi(&format!("    Input pass(es)  : {passes_str}"), "2"));
+                lines.push(ansi(
+                    &format!(
+                        "    Multiply method : {} · {} threads",
+                        info.simd_method, info.threads
+                    ),
+                    "2",
                 ));
-                lines.push(format!("  Memory usage    : {mem_str}"));
+                lines.push(ansi(&format!("    Memory usage    : {mem_str}"), "2"));
             }
         }
 
