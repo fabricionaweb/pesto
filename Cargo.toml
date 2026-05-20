@@ -42,9 +42,9 @@ sysinfo = { version = "0.36.1", default-features = false, features = ["system"] 
 # Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
 # Never enable this in production builds.
 bench-internals = []
-# Re-enable the experimental AVX2+GFNI PAR2 flush. Currently produces incorrect
-# recovery data (see `simd_recovery_matches_scalar_for_larger_slices`); kept
-# behind a feature flag so the fix can be developed and benchmarked.
+# Re-enable the GFNI PAR2 paths (AVX2+GFNI and AVX-512+GFNI). Both are
+# disabled in production until gfni_recovery_matches_scalar passes on real
+# GFNI hardware. Enable only for testing/benchmarking the fix.
 par2-avx2-gfni-unsafe = []
 
 [dev-dependencies]
