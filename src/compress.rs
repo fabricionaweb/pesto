@@ -289,9 +289,7 @@ fn compress_7z_file(
         cmd.arg(input);
     }
 
-    run_command(cmd, "7z")?;
-
-    on_progress(archive_path.metadata().map(|m| m.len()).unwrap_or(0));
+    run_with_progress(cmd, "7z", &archive_path, on_progress)?;
 
     Ok(CompressResult {
         path: archive_path,
@@ -329,9 +327,7 @@ fn compress_rar_file(
         cmd.arg(input);
     }
 
-    run_command(cmd, "rar")?;
-
-    on_progress(archive_path.metadata().map(|m| m.len()).unwrap_or(0));
+    run_with_progress(cmd, "rar", &archive_path, on_progress)?;
 
     Ok(CompressResult {
         path: archive_path,
@@ -350,20 +346,54 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
-    let output = cmd.output().with_context(|| format!("running `{tool}`"))?;
+/// Spawn `cmd`, poll `output_path` file size every 200 ms until the process
+/// exits, and call `on_progress` after each poll so the UI stays live.
+fn run_with_progress(
+    mut cmd: Command,
+    tool: &str,
+    output_path: &std::path::Path,
+    on_progress: &dyn Fn(u64),
+) -> Result<()> {
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("spawning `{tool}`"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = if !stderr.is_empty() {
-            stderr.trim().to_string()
-        } else {
-            stdout.trim().to_string()
-        };
-        bail!("`{tool}` exited with {}: {detail}", output.status);
+    loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("waiting for `{tool}`"))?
+        {
+            Some(status) => {
+                // Final progress tick before checking exit code.
+                on_progress(output_path.metadata().map(|m| m.len()).unwrap_or(0));
+                if !status.success() {
+                    let detail = child
+                        .stderr
+                        .as_mut()
+                        .and_then(|s| {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            s.read_to_string(&mut buf).ok()?;
+                            Some(buf)
+                        })
+                        .unwrap_or_default();
+                    bail!(
+                        "`{tool}` exited with {status}{}",
+                        if detail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", detail.trim())
+                        }
+                    );
+                }
+                return Ok(());
+            }
+            None => {
+                on_progress(output_path.metadata().map(|m| m.len()).unwrap_or(0));
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
     }
-    Ok(())
 }
 
 /// Generate a random archive password: 24 ASCII alphanumeric characters.
