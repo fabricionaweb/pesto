@@ -13,9 +13,12 @@ USER="your-username"
 API_KEY="your-api-key"
 CATID="video"  # category ID; common values: tv, movie, video, xxx
                # or a numeric ID (e.g. 5040 = TV > HD, 2040 = Movies > HD)
+LANGUAGE=""    # leave empty to auto-detect from the NFO (mediainfo output),
+               # or set a fixed value (e.g. "Portuguese") to always send it
 
 # --- pesto variables ---
 # PESTO_NZB  — path to the generated .nzb
+# PESTO_NFO  — path to the .nfo (empty when --nfo was not used)
 # PESTO_NAME — release name
 
 if [ -z "$PESTO_NZB" ] || [ ! -f "$PESTO_NZB" ]; then
@@ -39,6 +42,16 @@ fi
 if [ -n "$PESTO_NFO" ] && [ -f "$PESTO_NFO" ]; then
     ARGS+=(-F "nfo=@${PESTO_NFO}")
     echo "[Indexer] With NFO: $(basename "$PESTO_NFO")"
+
+    # Auto-detect language from the first Audio section in the mediainfo NFO.
+    if [ -z "$LANGUAGE" ]; then
+        LANGUAGE=$(awk '/^Audio/{found=1} found && /Language/{gsub(/.*: */,""); print; exit}' "$PESTO_NFO")
+    fi
+fi
+
+if [ -n "$LANGUAGE" ]; then
+    ARGS+=(-F "language=${LANGUAGE}")
+    echo "[Indexer] Language: ${LANGUAGE}"
 fi
 
 RESPONSE=$(curl "${ARGS[@]}" "${UPLOAD_URL}?user=${USER}&api=${API_KEY}")
