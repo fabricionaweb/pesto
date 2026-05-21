@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
+use tracing::{debug, trace};
 
 pub mod pool;
 
@@ -51,6 +52,7 @@ impl Connection {
     /// Open a connection to `host:port`, performing the TLS handshake when
     /// `tls` is set, and read the server greeting.
     pub async fn connect(host: &str, port: u16, tls: bool) -> Result<Connection> {
+        debug!(host, port, tls, "connecting");
         let tcp = TcpStream::connect((host, port))
             .await
             .with_context(|| format!("connecting to {host}:{port}"))?;
@@ -64,6 +66,7 @@ impl Connection {
                 .connect(server_name, tcp)
                 .await
                 .context("TLS handshake failed")?;
+            debug!(host, "TLS handshake complete");
             Box::new(tls_stream)
         } else {
             Box::new(tcp)
@@ -82,6 +85,7 @@ impl Connection {
                 greeting.text
             );
         }
+        debug!(code = greeting.code, text = %greeting.text, "server greeting");
         Ok(conn)
     }
 
@@ -89,13 +93,19 @@ impl Connection {
     ///
     /// The password is never logged or included in error messages.
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
+        debug!(%username, "authenticating");
         let resp = self.command(&format!("AUTHINFO USER {username}")).await?;
         match resp.code {
-            281 => return Ok(()), // accepted without a password
-            381 => {}             // password required
+            281 => {
+                debug!("authenticated (no password required)");
+                return Ok(());
+            }
+            381 => {}
             _ => bail!("AUTHINFO USER rejected: {} {}", resp.code, resp.text),
         }
 
+        // Password is kept out of log output; only the command prefix is logged.
+        debug!("sending AUTHINFO PASS [MASKED]");
         let resp = self.send_command("AUTHINFO PASS ", password).await?;
         if resp.code != 281 {
             bail!(
@@ -103,6 +113,7 @@ impl Connection {
                 resp.code
             );
         }
+        debug!("authenticated");
         Ok(())
     }
 
@@ -161,6 +172,7 @@ impl Connection {
     /// the caller keep secrets (such as a password) out of `prefix`, which is
     /// the part safe to mention in errors.
     async fn send_command(&mut self, prefix: &str, suffix: &str) -> Result<Response> {
+        trace!(cmd = prefix.trim_end(), "→");
         self.stream.write_all(prefix.as_bytes()).await?;
         self.stream.write_all(suffix.as_bytes()).await?;
         self.stream.write_all(b"\r\n").await?;
@@ -179,7 +191,9 @@ impl Connection {
         if n == 0 {
             bail!("NNTP connection closed by server");
         }
-        Response::parse(&line)
+        let resp = Response::parse(&line)?;
+        trace!(code = resp.code, text = %resp.text, "←");
+        Ok(resp)
     }
 }
 

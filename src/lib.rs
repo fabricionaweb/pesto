@@ -29,6 +29,7 @@ pub mod compress;
 pub mod config;
 pub mod history;
 pub mod indexer;
+pub mod logging;
 pub mod nfo;
 pub mod nntp;
 pub mod notify;

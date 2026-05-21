@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use pesto::compress::{compress, random_password, ArchiveFormat};
 use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
+use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 
@@ -316,6 +317,21 @@ struct Cli {
     /// given; determines the filename in the NZB and PAR2 metadata.
     #[arg(long, value_name = "NAME")]
     stdin_name: Option<String>,
+
+    /// Increase log verbosity. Repeat for more detail:
+    ///   `-v` = INFO (worker state, file discovery, PAR2 geometry),
+    ///   `-vv` = DEBUG (NNTP commands and responses — credentials masked),
+    ///   `-vvv` = TRACE (fine-grained timing and buffer events).
+    /// Logs are written to stderr (or --log-file). `RUST_LOG` overrides the
+    /// level when set.
+    #[arg(short, long, action = clap::ArgAction::Count, value_name = "LEVEL")]
+    verbose: u8,
+
+    /// Redirect verbose log output to FILE instead of stderr. The terminal
+    /// progress panel is kept active when this flag is set. Has no effect
+    /// without -v [config: output.log_file].
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
@@ -1145,6 +1161,9 @@ async fn run_watch(
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
+    // Initialise logging before anything else so early errors are captured.
+    logging::init(cli.verbose, cli.log_file.as_deref())?;
+
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {
         return run_wizard();
@@ -1245,6 +1264,11 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::resolve(file_config, cli.overrides())?);
     let json_mode = cli.output_format.trim().eq_ignore_ascii_case("json");
 
+    // Suppress the terminal panel when debug-level logs are going to stderr to
+    // avoid the panel and log lines corrupting each other. If the user redirected
+    // logs to a file with --log-file the panel can run alongside safely.
+    let logs_to_stderr = cli.verbose >= 2 && cli.log_file.is_none();
+
     let params = Arc::new(UploadParams {
         config: Arc::clone(&config),
         archive_password_raw: cli.archive_password.clone(),
@@ -1253,7 +1277,7 @@ async fn main() -> Result<()> {
         out: cli.out.clone(),
         write_history: config.history,
         renderer_opts: pesto::progress::RendererOptions {
-            quiet: cli.quiet || config.quiet,
+            quiet: cli.quiet || config.quiet || logs_to_stderr,
             bell: cli.bell || config.bell,
         },
     });

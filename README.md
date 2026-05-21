@@ -318,6 +318,44 @@ pesto --par2-only movie.mkv
 pesto --par2-only ./MyShow.S01/
 ```
 
+### SIMD acceleration
+
+pesto selects the fastest available Reed-Solomon path at startup via runtime
+CPU feature detection:
+
+| Path | Requirement | Notes |
+|------|------------|-------|
+| GFNI + AVX-512 | AVX-512F + AVX-512BW + GFNI | Pending validation on real hardware; enable with the `par2-avx2-gfni-unsafe` Cargo feature |
+| GFNI + AVX2 | AVX2 + GFNI (Ice Lake+, Zen 4+) | Default fast path on modern x86-64 |
+| AVX2 | AVX2 (Haswell+) | Fallback for CPUs without GFNI |
+| SSSE3 | SSSE3 (Sandy Bridge+) | Covers nearly all x86-64 CPUs since 2007 |
+| NEON | AArch64 | Apple Silicon, AWS Graviton, Ampere Altra |
+| Scalar | any | Universal fallback |
+
+The dispatch happens in `RecoveryEncoder::flush()` (`src/par2/encoder.rs`).
+Measured throughput on an i5-14400 at 10 % redundancy, 256 MiB workload:
+
+| Path | PAR2 encode speed |
+|------|----------------:|
+| Scalar | 317 MiB/s |
+| SSSE3 | 597 MiB/s |
+| AVX2 | 813 MiB/s |
+| GFNI + AVX2 | ~1 991–2 348 MiB/s (internal bench) |
+
+**Benchmarking individual paths** (requires the `bench-internals` feature):
+
+```bash
+cargo bench --features bench-internals
+```
+
+**Force a specific path** for testing (library API only):
+
+```rust
+use pesto::par2::encoder::{BenchPath, RecoveryEncoder};
+let enc = RecoveryEncoder::new(slice_size, total, exp_start, rec_count)
+    .with_forced_path(BenchPath::Avx2);
+```
+
 ---
 
 ## Batch and watch modes
