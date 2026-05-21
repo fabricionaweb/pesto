@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, info, warn};
 
 use crate::article::{
     default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article,
@@ -268,6 +269,14 @@ pub async fn post_files_with_progress(
         initial_segments += yenc::segments(meta.size, config.article_size).len() as u64;
     }
 
+    info!(
+        files = metas.len(),
+        segments = initial_segments,
+        article_size = config.article_size,
+        par2_pct = config.par2,
+        "upload plan"
+    );
+
     let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
     let total_conns = config.total_connections();
 
@@ -276,6 +285,11 @@ pub async fn post_files_with_progress(
     } else {
         total_conns.max(1).min(initial_segments.max(1) as usize)
     };
+    info!(
+        workers = worker_count,
+        connections = total_conns,
+        "connection pool"
+    );
 
     // Load resume state when enabled and a state path is provided.
     let (resume_arc, resume_path_owned) = if config.resume && !config.dry_run && !config.par2_only {
@@ -612,6 +626,13 @@ async fn producer(
         optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2);
 
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
+
+    info!(
+        input_slices = total_slices,
+        recovery_blocks = recovery_count,
+        slice_size = par2_slice_size,
+        "PAR2 geometry"
+    );
 
     // Auto-detect safe RAM limit if not specified (70% of available RAM)
     let memory_limit = match shared.config.par2_memory_limit {
@@ -1154,6 +1175,13 @@ async fn worker(
                     Ok(c) => c,
                     Err(e) => {
                         last_err = format!("{e:#}");
+                        warn!(
+                            segment = %message_id,
+                            attempt,
+                            max_attempts,
+                            error = %last_err,
+                            "connection failed; will retry"
+                        );
                         let backoff = slot.retry_delay();
                         if attempt < max_attempts {
                             tokio::time::sleep(backoff).await;
@@ -1167,6 +1195,7 @@ async fn worker(
                         if shared.config.verify {
                             match conn.stat(&message_id).await {
                                 Ok(true) => {
+                                    debug!(segment = %message_id, "posted and verified via STAT");
                                     posted = true;
                                     break;
                                 }
@@ -1174,20 +1203,30 @@ async fn worker(
                                     last_err = format!(
                                         "STAT: article {message_id} not found after posting"
                                     );
+                                    warn!(segment = %message_id, attempt, "STAT not found; retrying");
                                     slot.invalidate();
                                 }
                                 Err(e) => {
                                     last_err = format!("STAT: {e:#}");
+                                    warn!(segment = %message_id, error = %e, "STAT error; retrying");
                                     slot.invalidate();
                                 }
                             }
                         } else {
+                            debug!(segment = %message_id, "posted");
                             posted = true;
                             break;
                         }
                     }
                     Err(e) => {
                         last_err = format!("{e:#}");
+                        warn!(
+                            segment = %message_id,
+                            attempt,
+                            max_attempts,
+                            error = %last_err,
+                            "post failed; rotating server"
+                        );
                         slot.invalidate();
                     }
                 }

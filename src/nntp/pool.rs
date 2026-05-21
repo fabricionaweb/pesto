@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::time::Duration;
+use tracing::info;
 
 use crate::config::ServerEntry;
 use crate::nntp::Connection;
@@ -51,8 +52,12 @@ impl ConnectionSlot {
             let server = &self.servers[self.server_idx];
             let host = server.host.clone();
             let idx = self.server_idx;
+            info!(server = %host, server_idx = idx, "connecting");
             match connect_and_auth(server).await {
-                Ok(c) => self.conn = Some(c),
+                Ok(c) => {
+                    info!(server = %host, "connected and authenticated");
+                    self.conn = Some(c);
+                }
                 Err(e) => {
                     self.rotate();
                     return Err(e.context(format!("connect to {host} (server {idx})")));
@@ -68,6 +73,9 @@ impl ConnectionSlot {
     /// [`ensure_connected`][Self::ensure_connected] attempt targets a fresh
     /// server.
     pub fn invalidate(&mut self) {
+        if let Some(idx) = self.conn.as_ref().map(|_| self.server_idx) {
+            info!(server = %self.servers[idx].host, "connection invalidated; rotating to next server");
+        }
         self.conn = None;
         self.rotate();
     }

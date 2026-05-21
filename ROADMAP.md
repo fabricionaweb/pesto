@@ -1134,30 +1134,62 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 
 Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
 
-### 26a — Logging Infrastructure & Masking (Priority 1: High)
+### 26a — Logging Infrastructure & Masking (Priority 1: High) ✅
 
-- [ ] Add `-v`, `--verbose` flag (increments log level: `-v` = info, `-vv` = debug, `-vvv` = trace)
-- [ ] Implement a global `Log` macro or integration with `tracing`/`log` crate
-- [ ] **Crucial:** Implement automatic credential masking (mask `AUTHINFO PASS` values and passwords in URLs/configs) in all logs
-- [ ] Suppress the interactive terminal panel when high verbosity is enabled to avoid screen flickering/corruption
+- [x] Add `-v`, `--verbose` flag (count: `-v` = INFO, `-vv` = DEBUG, `-vvv` = TRACE)
+- [x] `tracing` + `tracing-subscriber` with `EnvFilter` (`RUST_LOG` overrides `-v`)
+- [x] Credential masking: `AUTHINFO PASS` is logged as `[MASKED]`; password never
+      appears in any log output (kept in the `suffix` half of `send_command`)
+- [x] Terminal panel suppressed automatically when `-vv` or higher sends to stderr
+      (logs and panel share stderr; running both would corrupt the display)
+- [x] `src/logging.rs` — `init(verbose, log_file)` sets the global subscriber once
 
-### 26b — Sanitized Network Trace (Priority 2: High)
+### 26b — Sanitized Network Trace (Priority 2: High) ✅
 
-- [ ] Log every NNTP command sent and response received (excluding article body data)
-- [ ] Include timestamps with millisecond precision for latency diagnosis
-- [ ] Log TLS handshake details (protocol version, cipher suite used)
+- [x] Log every NNTP command prefix sent (`→ POST`, `→ AUTHINFO USER`, …) at TRACE
+- [x] Log every NNTP response received (`← 240 Article received`) at TRACE
+- [x] Log TLS handshake completion and server greeting at DEBUG
+- [ ] Include wall-clock timestamps with millisecond precision around each command/response pair for latency diagnosis
 
-### 26c — Internal State & Transition Logging (Priority 3: Medium)
+### 26c — Internal State & Transition Logging (Priority 3: Medium) ✅
 
-- [ ] Log worker pool events: "Worker 3 connecting to server A", "Worker 3 authenticated", "Worker 3 starting post"
-- [ ] Log retry/failover decisions: "Segment 42 failed (441); retrying on server B (attempt 2/3)"
-- [ ] Log file discovery and PAR2 geometry: "Found 12 files", "Targeting 1024 PAR2 slices of 768KB"
+- [x] Pool events: "connecting", "connected and authenticated", "connection invalidated; rotating" at INFO (`nntp/pool.rs`)
+- [x] Retry/failover decisions: `warn!` with `segment`, `attempt`, `max_attempts`, `error` fields
+- [x] File discovery and upload plan: `files`, `segments`, `article_size`, `par2_pct` at INFO
+- [x] PAR2 geometry: `input_slices`, `recovery_blocks`, `slice_size` at INFO
 
-### 26d — Diagnostic Output & File Logging (Priority 4: Low)
+### 26d — Diagnostic Output & File Logging (Priority 4: Low) ✅
 
-- [ ] `--log-file PATH` flag to redirect all verbose output to a file while keeping the terminal clean
-- [ ] Summary of system info at start (OS, CPU features detected like AVX2/GFNI, memory limits)
-- [ ] Final summary of network performance: total retries, average latency per article, server uptime/error ratio
+- [x] `--log-file FILE` flag redirects verbose output to a file; terminal panel runs alongside normally
+- [ ] Summary of system info at start (OS, CPU features detected: AVX2/GFNI/NEON, memory limit in use)
+- [ ] Final network performance summary: total retries, per-server error counts, approximate per-article latency
+
+### 26e — SIMD Path Selection Logging (Priority 5: Low)
+
+Emit which Reed-Solomon SIMD path was chosen at startup so users know which
+hardware acceleration is active without running a separate benchmark.
+
+- [ ] Log the selected path at INFO when `-v` is active: e.g. `info!(path = "avx2+gfni", "RS encoder")`
+- [ ] Include the path in `Par2EncodeStarted` progress event (already has `threads`) so JSON consumers can read it
+
+### 26f — Compression Command Logging (Priority 6: Low)
+
+When `--compress` is active, log the exact command that was executed (with the
+password argument replaced by `[MASKED]`) so users can reproduce or debug
+archive failures.
+
+- [ ] Emit the sanitized command at DEBUG in `src/compress.rs` before spawning the child process
+- [ ] Log the exit status and stderr output of the compressor at DEBUG on non-zero exit
+
+### 26g — Per-Phase Timing Summary (Priority 7: Low)
+
+Print a structured timing breakdown at the end of each run when `-v` is active,
+showing how long each phase took (compress, PAR2 compute, PAR2 write, post,
+check) so bottlenecks are immediately visible in bug reports.
+
+- [ ] Wrap each phase in an `Instant` pair and emit a structured `info!` event at
+      phase end: `info!(phase = "par2_compute", elapsed_ms = 12340, "phase done")`
+- [ ] Accumulate and print a one-line summary table on completion
 
 ---
 
