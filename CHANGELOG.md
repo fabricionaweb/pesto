@@ -7,6 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.17] — 2026-05-21
+
+### Added
+- **Verbose mode & diagnostics (Phase 26)**
+  - `-v` / `--verbose` flag (repeat for more detail: `-v` = INFO, `-vv` = DEBUG,
+    `-vvv` = TRACE); backed by `tracing` + `tracing-subscriber` with `RUST_LOG` override
+  - `--log-file FILE` redirects log output to a file; terminal panel stays active
+  - System info logged at startup: OS, architecture, CPU features (AVX2+GFNI, SSSE3, NEON)
+  - NNTP network trace at DEBUG/TRACE: every command sent and response received,
+    with per-command round-trip time in milliseconds
+  - TLS handshake and server greeting logged at DEBUG
+  - Worker pool events at INFO: connecting, authenticated, connection invalidated
+  - Upload plan at INFO: file count, segment count, PAR2 geometry, connection pool size
+  - Reed-Solomon SIMD path selection logged at INFO (`simd=avx2+gfni threads=6`)
+  - Retry and failover decisions logged at WARN with attempt/error details
+  - Compression command logged at DEBUG with password arguments masked as `[MASKED]`
+  - Per-phase timing: each phase emits `elapsed_ms` + `phase` on completion
+    (compress, par2_compute, par2_write, post, check)
+  - One-line timing summary at upload completion
+  - Network performance summary: segments posted, failed, total retries
+  - Terminal panel suppressed automatically at `-vv` when logs share stderr
+  - Credentials never appear in log output (`AUTHINFO PASS [MASKED]`)
+- **README**: SIMD acceleration table added under PAR2 recovery data section,
+  with dispatch chain, benchmark numbers and `--features bench-internals` usage
+
 ## [0.2.16] — 2026-05-20
 
 ### Added
