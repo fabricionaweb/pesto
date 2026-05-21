@@ -1012,15 +1012,22 @@ Internal SIMD bench (`cargo bench --features bench-internals`) shows the GFNI+AV
 
 Items are listed in order of expected win-per-effort.
 
-### 25Z — `flush_avx2_gfni` produces incorrect recovery data 🔴 (blocking)
+### 25Z — `flush_avx2_gfni` correctness bug diagnosed and fixed ✅
 
 While running the existing `simd_recovery_matches_scalar_for_larger_slices` test as part of the Phase 25 checks, the AVX2+GFNI path (added in commit `7cf832e`) was found to produce recovery bytes that disagree with the scalar reference. Confirmed end-to-end with `par2cmdline`: a damaged file is *not* repairable from the generated set — "Found 13 of 14 data blocks. Repair Failed." The earlier "+2.8% win on 10G" against parpar was measured against mathematically wrong PAR2 output.
 
+**Root cause:** `gf2p8affineqb` places the coefficients for output bit `row` at byte `(7-row)` of the u64 matrix operand — opposite to the intuitive `byte[row]` convention. Both `flush_avx2_gfni_work` and `flush_avx512_gfni_work` used `let shift = row * 8` (wrong); the fix is `let shift = (7 - row) * 8`. The correct identity matrix for this instruction is `0x0102040810204080` (byte 0 = 0x80), not `0x8040201008040201`.
+
 - [x] Disabled the runtime auto-dispatch into `flush_avx2_gfni`; gated behind the new `par2-avx2-gfni-unsafe` Cargo feature so the fix can still be developed and benchmarked
-- [x] Added `#[allow(dead_code)]` on `Avx2GfniTable`, `flush_avx2_gfni`, `flush_avx2_gfni_work` to keep clippy clean while disabled
-- [ ] Diagnose the bug — likely candidates: `mat_lo`/`mat_hi` matrix layout (placing different matrices in the two qwords of each 128-bit lane), the `deint_mask` byte ordering, or the `unpacklo_epi8` re-interleave at the end
-- [ ] Add a smaller regression test that runs the AVX2+GFNI path directly via `BenchPath::Avx2Gfni` under `--features bench-internals` so the next attempt is iterated against a fast oracle
-- [ ] Re-enable runtime dispatch only after both unit and `par2 repair` round-trip pass
+- [x] Root cause diagnosed empirically: probed all 64 single-bit matrix positions with input `0x01`; confirmed `gf2p8affineqb` uses byte `(7-row)` for output bit `row`
+- [x] Fixed matrix byte order in `flush_avx2_gfni_work`: `let shift = (7 - row) * 8` (was `row * 8`)
+- [x] Applied the same fix to `flush_avx512_gfni_work` (same instruction convention)
+- [x] Verified AVX2+GFNI path correct on i5-14400 via `simd_recovery_matches_scalar_for_larger_slices`; re-enabled in production dispatch (no feature flag required)
+- [x] AVX-512+GFNI path kept behind `par2-avx2-gfni-unsafe` feature — same matrix fix applied but **not yet validated on real AVX-512+GFNI hardware**
+
+**PRIORITY — AVX-512+GFNI validation needed:**
+- [ ] Run `cargo test --features bench-internals -- gfni_recovery_matches_scalar` on hardware with AVX-512F + AVX-512BW + GFNI (Ice Lake, Sapphire Rapids, or equivalent) to confirm `flush_avx512_gfni_work` is correct
+- [ ] Once the test passes, remove the `par2-avx2-gfni-unsafe` gate from the AVX-512+GFNI dispatch block and enable it in production
 
 ### 25a — A/B `chunk_size` in `flush_avx2_gfni_work` ✅
 

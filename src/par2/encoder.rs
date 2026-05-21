@@ -274,9 +274,8 @@ impl RecoveryEncoder {
             }
         }
 
-        // Both GFNI paths are disabled in production until correctness is
-        // confirmed on real GFNI hardware (gfni_recovery_matches_scalar test).
-        // Enable with --features par2-avx2-gfni-unsafe for testing only.
+        // AVX-512+GFNI path: matrix fix applied but not yet validated on real
+        // AVX-512 hardware. Keep behind the unsafe feature until confirmed.
         #[cfg(all(target_arch = "x86_64", feature = "par2-avx2-gfni-unsafe"))]
         if std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512bw")
@@ -288,7 +287,8 @@ impl RecoveryEncoder {
             return;
         }
 
-        #[cfg(all(target_arch = "x86_64", feature = "par2-avx2-gfni-unsafe"))]
+        // AVX2+GFNI path: verified correct on i5-14400 (simd_recovery_matches_scalar).
+        #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
             unsafe {
                 self.flush_avx2_gfni();
@@ -986,7 +986,6 @@ impl RecoveryEncoder {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,gfni")]
-    #[allow(dead_code)]
     unsafe fn flush_avx2_gfni(&mut self) {
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
@@ -1044,10 +1043,12 @@ impl RecoveryEncoder {
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
 
-                let mut m_ll = 0u64;
-                let mut m_lh = 0u64;
-                let mut m_hl = 0u64;
-                let mut m_hh = 0u64;
+                // gf2p8affineqb uses byte (7-row) of the u64 matrix operand for
+                // output bit `row` — so store each row at position (7-row)*8.
+                let mut m_ll = 0u64; // lo input byte → lo output byte
+                let mut m_lh = 0u64; // hi input byte → lo output byte
+                let mut m_hl = 0u64; // lo input byte → hi output byte
+                let mut m_hh = 0u64; // hi input byte → hi output byte
                 for row in 0..8usize {
                     let mut row_ll = 0u8;
                     let mut row_lh = 0u8;
@@ -1069,10 +1070,11 @@ impl RecoveryEncoder {
                             row_hh |= 1 << j;
                         }
                     }
-                    m_ll |= (row_ll as u64) << (row * 8);
-                    m_lh |= (row_lh as u64) << (row * 8);
-                    m_hl |= (row_hl as u64) << (row * 8);
-                    m_hh |= (row_hh as u64) << (row * 8);
+                    let shift = (7 - row) * 8;
+                    m_ll |= (row_ll as u64) << shift;
+                    m_lh |= (row_lh as u64) << shift;
+                    m_hl |= (row_hl as u64) << shift;
+                    m_hh |= (row_hh as u64) << shift;
                 }
 
                 let mat_lo = _mm256_set_epi64x(m_lh as i64, m_ll as i64, m_lh as i64, m_ll as i64);
@@ -1529,9 +1531,8 @@ impl RecoveryEncoder {
                 //   result_lo = M_ll * lo  ^  M_lh * hi
                 //   result_hi = M_hl * lo  ^  M_hh * hi
                 //
-                // GFNI matrix encoding: row i lives at bits [i*8 + 7 : i*8]
-                // (row 0 in the LSB byte, row 7 in the MSB byte).
-                // M[i][j] = 1 iff input bit j affects output bit i.
+                // gf2p8affineqb uses byte (7-row) of the u64 matrix operand for
+                // output bit `row` — so store each row at position (7-row)*8.
                 let mut m_ll = 0u64; // lo input byte → lo output byte
                 let mut m_lh = 0u64; // hi input byte → lo output byte
                 let mut m_hl = 0u64; // lo input byte → hi output byte
@@ -1557,10 +1558,11 @@ impl RecoveryEncoder {
                             row_hh |= 1 << j;
                         }
                     }
-                    m_ll |= (row_ll as u64) << (row * 8);
-                    m_lh |= (row_lh as u64) << (row * 8);
-                    m_hl |= (row_hl as u64) << (row * 8);
-                    m_hh |= (row_hh as u64) << (row * 8);
+                    let shift = (7 - row) * 8;
+                    m_ll |= (row_ll as u64) << shift;
+                    m_lh |= (row_lh as u64) << shift;
+                    m_hl |= (row_hl as u64) << shift;
+                    m_hh |= (row_hh as u64) << shift;
                 }
 
                 // Each 128-bit lane has two qwords: the low qword handles lo bytes
