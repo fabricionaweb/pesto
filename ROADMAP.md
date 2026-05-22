@@ -1415,20 +1415,46 @@ during the flush hot path.  `BenchPath::Avx2Altmap` allows isolated benchmarking
 - [x] Memory: no temporary normal-layout copy during flush; transposition happens in
       a separate `Vec<Vec<u8>>` that is dropped before the XOR kernel runs
 
-### 27g — Benchmark and gate (small, 2–3 h)
+### 27g — Benchmark and gate ✅ (small, 2–3 h)
 
-Measure end-to-end throughput on both i5-10400 (AVX2-only) and i5-14400 (GFNI+AVX2)
-using `bench_pesto_vs_parpar.sh`.
+Benchmarked on i5-10400 (AVX2-only, no GFNI), 768 KB slices, 12 rayon threads:
 
-- [ ] On AVX2-only (i5-10400): `Pesto ≥ Parpar` for 1G, 5G, 10G
-- [ ] On GFNI hardware (i5-14400): ALTMAP path is **not** used (GFNI path already
-      wins); confirm no regression in GFNI throughput
-- [ ] `cargo clippy --all-targets -- -D warnings` clean
-- [ ] `cargo test` clean (all existing tests pass, including `par2cmdline` repair
-      integration test)
-- [ ] Remove the `altmap` feature flag; make ALTMAP the default AVX2 path if the
-      benchmark confirms ≥ 20 % improvement; keep PSHUFB as compile-time fallback
-      under `#[cfg(not(target_feature = "avx2"))]`
+```
+scenario            AVX2(ALTMAP)          AVX2(nibble)         SSSE3          scalar
+-------------------------------------------------------------------------------------
+256 MiB @ 10%   224.6 MiB/s ( 7.68 GiB/s)   966.6 MiB/s (33.04 GiB/s)   603.3 MiB/s   336.0 MiB/s
+256 MiB @ 20%    97.5 MiB/s ( 6.66 GiB/s)   614.8 MiB/s (42.02 GiB/s)   367.5 MiB/s   161.6 MiB/s
+512 MiB @ 10%   102.4 MiB/s ( 7.00 GiB/s)   675.6 MiB/s (46.18 GiB/s)   410.6 MiB/s   179.6 MiB/s
+
+Speedup vs scalar (256 MiB @ 10%):
+  AVX2(ALTMAP)   0.61×   ← SLOWER than scalar!
+  AVX2           2.67×
+
+ALTMAP/AVX2 = 0.209×  [REGRESS — target was ≥ 1.20×]
+```
+
+**Verdict: NEGATIVE — ALTMAP is ~5× slower than nibble-shuffle on AVX2.**
+
+Root cause: the XOR dep matrix for GF(2^16) has an average of ~8 set bits per output
+plane, requiring ~128 vpxor operations per 256-word bit-group. The nibble-shuffle
+needs only ~8 PSHUFB+XOR ops for the same 16 words, so it wins decisively.
+ALTMAP would only be competitive with:
+1. AVX-512 (64-byte vectors halve the iteration count), or
+2. CSE-optimised XOR schedules per-coefficient (ParPar's actual approach), or
+3. Very sparse dep matrices (low-Hamming-weight coefficients).
+
+None of these apply here: PSHUFB remains the best AVX2-only path.
+
+**Decision:** Do NOT make ALTMAP the default dispatch path. Keep `new_altmap()` and
+`BenchPath::Avx2Altmap` accessible for research, but remove the ALTMAP branch from
+the auto-detection `flush()` dispatch — it will never be reached in production since
+the auto-dispatch only calls it for `RecoveryBufferSet::Altmap` encoders, which are
+only created by `new_altmap()`.
+
+- [x] Benchmark run on i5-10400 — results above
+- [x] `cargo clippy --all-targets -- -D warnings` clean
+- [x] `cargo test` clean
+- [x] Verdict documented; nibble-shuffle kept as default AVX2 path
 
 ### 27h — Apply ALTMAP to SSSE3 path (small, 2 h)
 
@@ -1445,11 +1471,12 @@ inefficiency as `flush_avx2_work`. Adapt the kernel to use 128-bit ALTMAP
 - [ ] On i5-10400 (AVX2-only), `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar
       for 1G, 5G **and** 10G
 - [ ] On i5-14400 (GFNI), no regression vs Phase 25 measurements
-- [ ] `par2cmdline` successfully repairs files produced by the ALTMAP path
-- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
+- [x] `par2cmdline` successfully repairs files produced by the ALTMAP path
+- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
       all clean
 - [ ] Internal SIMD bench shows `flush_avx2_altmap_work` ≥ 20 % faster than
-      `flush_avx2_work` on warm 64–256 MiB workloads
+      `flush_avx2_work` on warm 64–256 MiB workloads — **NOT ACHIEVED** (0.209×);
+      nibble-shuffle kept as default; ALTMAP preserved for research only
 
 ---
 

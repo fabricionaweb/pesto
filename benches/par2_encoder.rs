@@ -38,6 +38,41 @@ fn make_slice(seed: u64) -> Vec<u8> {
     s
 }
 
+/// Run the ALTMAP encoder for at least `MIN_DURATION` and return
+/// (input_mib_per_s, gf_madd_gib_per_s).  Uses `new_altmap` so the entire
+/// path (transpose + vpxor kernel + from_altmap) is exercised.
+fn measure_altmap(input_mib: usize, redundancy_pct: usize) -> (f64, f64) {
+    let input_bytes = input_mib * 1024 * 1024;
+    let total_slices = input_bytes.div_ceil(SLICE_SIZE);
+    let recovery_count = (total_slices * redundancy_pct) / 100;
+
+    let slices: Vec<Vec<u8>> = (0..total_slices as u64).map(make_slice).collect();
+
+    let mut iters = 0u32;
+    let mut total_elapsed = Duration::ZERO;
+
+    loop {
+        let start = Instant::now();
+        let mut enc = RecoveryEncoder::new_altmap(SLICE_SIZE, total_slices, 0, recovery_count);
+        for slice in slices.iter().cloned() {
+            enc.add_slice(slice);
+        }
+        let (recovery, _) = enc.finish();
+        assert_eq!(recovery.len(), recovery_count);
+        total_elapsed += start.elapsed();
+        iters += 1;
+
+        if total_elapsed >= MIN_DURATION {
+            break;
+        }
+    }
+
+    let elapsed = total_elapsed.as_secs_f64() / iters as f64;
+    let in_mib = (total_slices * SLICE_SIZE) as f64 / MIB;
+    let madd_gib = (total_slices as f64 * recovery_count as f64 * SLICE_SIZE as f64) / GIB;
+    (in_mib / elapsed, madd_gib / elapsed)
+}
+
 /// Run the encoder with `path` for at least `MIN_DURATION` and return
 /// (input_mib_per_s, gf_madd_gib_per_s).
 fn measure(input_mib: usize, redundancy_pct: usize, path: BenchPath) -> (f64, f64) {
@@ -108,6 +143,12 @@ fn main() {
     #[cfg(not(target_arch = "x86_64"))]
     let has_ssse3 = false;
 
+    #[cfg(target_arch = "x86_64")]
+    let has_avx2_altmap =
+        std::is_x86_feature_detected!("avx2") && !std::is_x86_feature_detected!("gfni");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has_avx2_altmap = false;
+
     println!("PAR2 encoder benchmark — slice {SLICE_SIZE} B — {threads} rayon thread(s)");
     println!(
         "SIMD available: GFNI+AVX512={} | GFNI+AVX2={} | AVX2={} | SSSE3={} | scalar=always",
@@ -116,6 +157,7 @@ fn main() {
         yn(has_avx2),
         yn(has_ssse3),
     );
+    println!("ALTMAP kernel: {} (AVX2 without GFNI)", yn(has_avx2_altmap));
     println!();
 
     let scenarios = [
@@ -143,10 +185,10 @@ fn main() {
 
     // Table header
     println!(
-        "{:<18}  {:>22}  {:>22}  {:>22}  {:>22}  {:>22}",
-        "scenario", "GFNI+AVX512", "GFNI+AVX2", "AVX2", "SSSE3", "scalar"
+        "{:<18}  {:>22}  {:>22}  {:>22}  {:>22}  {:>22}  {:>22}",
+        "scenario", "GFNI+AVX512", "GFNI+AVX2", "AVX2(ALTMAP)", "AVX2", "SSSE3", "scalar"
     );
-    println!("{}", "-".repeat(138));
+    println!("{}", "-".repeat(163));
 
     #[cfg(target_arch = "x86_64")]
     let paths: &[(BenchPath, bool, &str)] = &[
@@ -161,17 +203,38 @@ fn main() {
 
     for s in &scenarios {
         print!("{:<18}", s.label);
+
+        // ALTMAP column (before other AVX2 paths for easy visual comparison).
+        #[cfg(target_arch = "x86_64")]
+        if has_avx2_altmap {
+            let (in_mib_s, gf_gib_s) = measure_altmap(s.input_mib, s.redundancy_pct);
+            print!("  {:>22}", "—"); // GFNI+AVX512 slot
+            print!("  {:>22}", "—"); // GFNI+AVX2 slot
+            let gf_str = if gf_gib_s >= 1.0 {
+                format!("{gf_gib_s:5.2} GiB/s")
+            } else {
+                format!("{:5.0} MiB/s", gf_gib_s * 1024.0)
+            };
+            print!("  {:>10.1} MiB/s ({gf_str})", in_mib_s);
+        } else {
+            // No ALTMAP on this CPU; skip first three columns the normal loop handles.
+        }
+
         for (path, available, _label) in paths {
+            // Skip GFNI paths and AVX2 if we already printed the ALTMAP column in their place.
+            #[cfg(target_arch = "x86_64")]
+            if has_avx2_altmap && matches!(path, BenchPath::Avx512Gfni | BenchPath::Avx2Gfni) {
+                continue; // already printed "—" above
+            }
+
             if *available {
                 let (in_mib_s, gf_gib_s) = measure(s.input_mib, s.redundancy_pct, *path);
-                print!("  {:>10.1} MiB/s", in_mib_s);
-                // Show GF madd rate compactly
                 let gf_str = if gf_gib_s >= 1.0 {
                     format!("{gf_gib_s:5.2} GiB/s")
                 } else {
                     format!("{:5.0} MiB/s", gf_gib_s * 1024.0)
                 };
-                print!(" ({gf_str})");
+                print!("  {:>10.1} MiB/s ({gf_str})", in_mib_s);
             } else {
                 print!("  {:>22}", "—");
             }
@@ -181,16 +244,38 @@ fn main() {
 
     println!();
 
-    // Speedup table vs scalar baseline (only makes sense when multiple paths available).
+    // Speedup vs scalar, and ALTMAP vs AVX2 comparison.
     #[cfg(target_arch = "x86_64")]
-    if has_avx2 || has_ssse3 || has_gfni_256 || has_gfni_512 {
+    if has_avx2 || has_ssse3 || has_gfni_256 || has_gfni_512 || has_avx2_altmap {
         println!("Speedup vs scalar (GF madd rate, 256 MiB @ 10%):");
         let (_, scalar_madd) = measure(256, 10, BenchPath::Scalar);
+        if has_avx2_altmap {
+            let (_, altmap_madd) = measure_altmap(256, 10);
+            println!("  AVX2(ALTMAP)   {:.2}×", altmap_madd / scalar_madd);
+        }
         for (path, available, label) in paths {
             if *available && *path != BenchPath::Scalar {
                 let (_, path_madd) = measure(256, 10, *path);
                 println!("  {label:<14} {:.2}×", path_madd / scalar_madd);
             }
+        }
+
+        // Direct ALTMAP vs plain AVX2 comparison — the key 27g metric.
+        #[cfg(target_arch = "x86_64")]
+        if has_avx2_altmap {
+            println!();
+            println!("ALTMAP vs plain AVX2 (256 MiB @ 10%):");
+            let (_, avx2_madd) = measure(256, 10, BenchPath::Avx2);
+            let (_, altmap_madd) = measure_altmap(256, 10);
+            let ratio = altmap_madd / avx2_madd;
+            let verdict = if ratio >= 1.20 {
+                "PASS ≥ 20 %"
+            } else if ratio >= 1.0 {
+                "marginal (< 20 %)"
+            } else {
+                "REGRESS"
+            };
+            println!("  ALTMAP/AVX2 = {ratio:.3}×  [{verdict}]");
         }
         println!();
     }
