@@ -827,7 +827,7 @@ async fn producer(
     let memory_limit = match shared.config.par2_memory_limit {
         Some(limit) => limit,
         None => {
-            let mut sys = sysinfo::System::new_all();
+            let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let available_ram = sys.available_memory();
             let safe_limit = (available_ram as f64 * 0.70) as usize;
