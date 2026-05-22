@@ -58,6 +58,36 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
     Some(build_listing(paths))
 }
 
+/// Generate NFO content for a consolidated season (multiple source directories).
+///
+/// Finds the alphabetically first video file across all `dirs`, runs `mediainfo`
+/// on it, and returns the output. Falls back to `generate(dirs)` when no video
+/// is found or `mediainfo` fails.
+pub fn generate_season(dirs: &[PathBuf]) -> Option<String> {
+    if dirs.is_empty() {
+        return None;
+    }
+    // Collect all directories, sorted, so episode order is stable.
+    let mut sorted_dirs: Vec<&PathBuf> = dirs.iter().collect();
+    sorted_dirs.sort();
+    for dir in sorted_dirs {
+        let first = if dir.is_dir() {
+            find_first_video(dir)
+        } else if is_video(dir) {
+            Some(dir.clone())
+        } else {
+            None
+        };
+        if let Some(video) = first {
+            if let Ok(out) = run_mediainfo(&video) {
+                return Some(out);
+            }
+        }
+    }
+    // Fallback: plain listing.
+    generate(dirs)
+}
+
 /// Write the NFO content to `path`, creating or overwriting it.
 pub fn write(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content.as_bytes())
