@@ -1001,7 +1001,7 @@ async fn run_batch(
         }
     }
 
-    // Write consolidated season NZB when requested.
+    // Write consolidated season NZB (and matching .nfo + hooks) when requested.
     if let Some(season_path) = season_nzb {
         if !all_segments.is_empty() {
             let config = &params.config;
@@ -1052,6 +1052,52 @@ async fn run_batch(
                         }
                     }
                 }
+            }
+
+            // Generate season .nfo (mediainfo of first episode) next to the NZB.
+            let nfo_path: Option<PathBuf> = if config.nfo {
+                let nfo_out = season_path.with_extension("nfo");
+                match pesto::nfo::generate_season(dirs) {
+                    Some(content) => match pesto::nfo::write(&nfo_out, &content) {
+                        Ok(()) => {
+                            println!("wrote nfo:  {}", nfo_out.display());
+                            Some(nfo_out)
+                        }
+                        Err(e) => {
+                            eprintln!("season nfo write failed: {e}");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            // Run post-upload hooks — same as a regular upload.
+            let season_label = season_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "season".to_string());
+            let total_bytes: u64 = all_segments.iter().map(|s| s.bytes).sum();
+            let effective_password = config
+                .nzb_password
+                .clone()
+                .or_else(|| config.compress_password.clone());
+            let hook_env = HookEnv {
+                nzb_path: Some(&season_path),
+                nfo_path: nfo_path.as_deref(),
+                name: &season_label,
+                total_bytes,
+                group: config.groups.first().map(String::as_str),
+                password: effective_password.as_deref(),
+                server: &config.host,
+            };
+            if let Some(cmd) = &config.post_hook {
+                run_post_hook(cmd, &hook_env);
+            }
+            if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
+                run_hooks_dir(&hooks_dir, &hook_env);
             }
         }
     }
@@ -1345,7 +1391,13 @@ async fn main() -> Result<()> {
                     let md = std::fs::metadata(p).ok()?;
                     if md.is_dir() {
                         let name = p.file_name()?.to_string_lossy();
-                        Some(PathBuf::from(format!("{name}.nzb")))
+                        let stem = format!("{name}.nzb");
+                        let path = if let Some(dir) = &params.config.nzb_dir {
+                            expand_tilde(dir).join(&stem)
+                        } else {
+                            PathBuf::from(&stem)
+                        };
+                        Some(path)
                     } else {
                         None
                     }
