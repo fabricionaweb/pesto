@@ -346,8 +346,9 @@ impl RecoveryEncoder {
             pending_checksums: Vec::new(),
             #[cfg(feature = "bench-internals")]
             forced_path: None,
+            // Shuffle2x never uses dep_tables (those are only for the ALTMAP path).
             #[cfg(target_arch = "x86_64")]
-            dep_tables: Self::build_dep_tables(),
+            dep_tables: None,
         }
     }
 
