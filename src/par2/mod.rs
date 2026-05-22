@@ -16,3 +16,4 @@ pub mod encoder;
 pub mod gf16;
 pub mod layout;
 pub mod packet;
+pub mod shuffle2x;

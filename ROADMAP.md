@@ -1496,6 +1496,121 @@ architectural reason to implement this variant.
 
 ---
 
+## Phase 28 — Shuffle2x AVX2 kernel
+
+**Goal:** close the remaining ~19% end-to-end gap vs parpar on AVX2-only hardware
+by replacing the current 8-PSHUFB nibble-shuffle kernel with the Shuffle2x technique
+used by parpar.
+
+### Background
+
+Investigation of parpar's source (`gf16_shuffle2x_avx2.c`) revealed that its AVX2
+path is not a standard 4-nibble PSHUFB kernel — it is the **Shuffle2x** technique,
+which uses a pre-processed data layout to halve the number of PSHUFB operations:
+
+**Current pesto kernel** (`flush_avx2_work`) — per 32-byte block, 1 recovery block:
+- Extract nibbles: 2 AND + 1 SRL
+- 8 PSHUFB + 6 XOR/AND/shift to produce lo/hi bytes of result
+- 1 load(dst) + 1 XOR + 1 store
+- ≈ **21 instructions per 32 bytes per block**
+
+**Parpar Shuffle2x kernel** — per 32-byte block (input in prepared layout), 1 block:
+- Extract nibbles: 2 AND + 1 SRL
+- 4 PSHUFB (shufNormLo, shufSwapLo, shufNormHi, shufSwapHi)
+- 1 `vperm2i128` (handles lane-crossing contribution without extra PSHUFB)
+- 3 XOR + 1 load(dst) + 1 store
+- ≈ **14 instructions per 32 bytes per block** — 33% fewer
+
+**How the lane trick works:** Input is pre-arranged so lo bytes of all words sit in
+lane 0 and hi bytes in lane 1 of each 256-bit register. Each PSHUFB then processes
+both lo-nibbles of lo-bytes (lane 0) and lo-nibbles of hi-bytes (lane 1) in a single
+instruction. The "swapped" partial accumulates contributions that cross the lane
+boundary (lo-byte nibbles contributing to hi-byte output, and vice versa);
+`vperm2i128(swapped, 0x01)` moves those contributions to the correct side in one
+instruction, replacing four PSHUFB+pack operations.
+
+The coefficient table format changes from 8 YMM registers (4 nibble pairs × 2 bytes)
+to 4 YMM registers (shufNormLo, shufSwapLo, shufNormHi, shufSwapHi), enabling a
+2-way recovery block unroll within the 16 available YMM registers:
+  - 2 blocks × 4 table regs = 8 regs for tables
+  - Plus mask, nibbles, data, result, swapped, dst = ~6 regs
+  - Total: ~14 regs — fits with 2 spare.
+
+**Input and recovery buffer layout:** Input slices are converted to the prepared
+layout once per flush (amortized over all recovery blocks). Recovery buffers are also
+stored in prepared layout during accumulation and converted back to normal u16 at
+`finish()` time.
+
+**Expected gain:** ~33% instruction reduction in the inner loop →
+closing most of the ~19% throughput gap vs parpar on AVX2-only hardware.
+
+### 28a — Prepare/finish and Shuffle2x buffer layout ✅ (small, 2–3 h)
+
+Add the data-layout infrastructure that the Shuffle2x kernel depends on:
+
+- [ ] `prepare_shuffle2x(src: &[u8])`: converts one slice to Shuffle2x layout —
+      `separate_lo_hi` (`vpshufb` with byte-interleave mask) + `vpermq [3,1,2,0]`
+      so lo bytes are in lane 0 and hi bytes in lane 1 of each 256-bit chunk.
+      Runs once per queued slice per flush, in parallel via rayon.
+- [ ] `finish_shuffle2x(src: &[u8]) -> Vec<u16>`: inverse transform for a recovery
+      buffer — `vpermq [2,0,3,1]` + `vpshufb` with interleave mask.
+      Runs once per recovery block in `finish()`.
+- [ ] `RecoveryBufferSet::Shuffle2x(Vec<Vec<u8>>)` variant; recovery buffers stored
+      in prepared layout (same byte count as Normal, different arrangement).
+- [ ] `RecoveryEncoder::new_shuffle2x(...)` constructor — mirrors `new_altmap`.
+- [ ] `BenchPath::Avx2Shuffle2x` under `bench-internals` feature.
+- [ ] Roundtrip test: `prepare → finish` produces original data.
+
+### 28b — `flush_avx2_shuffle2x_work` kernel (large, 1 day)
+
+The hot-path kernel that accumulates queued slices into Shuffle2x recovery buffers:
+
+- [ ] Pre-compute 4-register coefficient tables per (recovery_block, queued_slice)
+      pair: `shufNormLo`, `shufSwapLo`, `shufNormHi`, `shufSwapHi` — packed from
+      the `prodLo/Hi0-3` polynomial powers following parpar's table layout.
+- [ ] 2-way recovery block unroll (2 blocks × 4 table regs = 8 regs for tables).
+- [ ] Inner loop per 32 bytes:
+      1. `_mm256_load_si256(src)` — prepared input, guaranteed aligned
+      2. Extract lo nibbles (AND mask_f)
+      3. `shufNormLoX(ti)` → result_X ; `shufSwapLoX(ti)` → swapped_X (both blocks)
+      4. Extract hi nibbles (SRLI + AND)
+      5. `shufNormHiX(ti)` → XOR into result_X ; `shufSwapHiX(ti)` → XOR into swapped_X
+      6. `vperm2i128(swapped_X, 0x01)` → lane-crossed partial
+      7. XOR result_X with permuted, XOR with load(dst), store
+- [ ] Scalar tail for remainder bytes.
+- [ ] Gate behind `#[cfg(target_arch = "x86_64")]` + AVX2 detection.
+- [ ] Correctness: compare byte-for-byte vs `flush_avx2_work` on known inputs.
+
+### 28c — Dual-slice processing (medium, 3–4 h)
+
+When `n_queued ≥ 2`, pack two slices' coefficient tables into the same 8 YMM
+registers (following parpar's `JOIN_VEC(prodLo0, prodHi2, i)` pattern) and process
+both slices per inner-loop iteration, halving coefficient-register reload cost:
+
+- [ ] Build "paired" tables when `q_idx + 1 < n_queued`
+- [ ] Dedicated loop body for the 2-slice case; scalar pair fallback for odd remainder
+- [ ] Measure separately to confirm the second-slice amortisation pays
+
+### 28d — Benchmark and gate (small, 2–3 h)
+
+- [ ] Internal bench (`cargo bench --features bench-internals`): Shuffle2x must exceed
+      nibble-shuffle by ≥ 20% on i5-10400 (256 MiB @ 10%)
+- [ ] End-to-end (`bench_pesto_vs_parpar.sh`): target pesto ≥ parpar for 1G, 5G, 10G
+- [ ] If passes: make `flush_avx2_shuffle2x_work` the default AVX2 dispatch path
+      (replace the current `flush_avx2` branch in auto-detection); keep old path as
+      `BenchPath::Avx2` for regression testing
+- [ ] Verify no regression on i5-14400 (GFNI path must be unaffected)
+
+### Definition of done
+
+- [ ] `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar on i5-10400 for 1G, 5G, 10G
+- [ ] `par2cmdline` successfully repairs files produced by the Shuffle2x path
+- [ ] Internal bench: Shuffle2x/nibble-shuffle ≥ 1.20× on 256 MiB @ 10%
+- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
+      all clean
+
+---
+
 ## Phase 26 — Verbose Mode & Diagnostics
 
 Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
