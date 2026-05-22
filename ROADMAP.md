@@ -1456,15 +1456,15 @@ only created by `new_altmap()`.
 - [x] `cargo test` clean
 - [x] Verdict documented; nibble-shuffle kept as default AVX2 path
 
-### 27h — Apply ALTMAP to SSSE3 path (small, 2 h)
+### 27h — Apply ALTMAP to SSSE3 path — **CANCELLED**
 
-The `flush_ssse3_work` path (for pre-Haswell CPUs) currently has the same structural
-inefficiency as `flush_avx2_work`. Adapt the kernel to use 128-bit ALTMAP
-(`_mm_movemask_epi8`, 128-bit XOR), once the AVX2 ALTMAP path is proven correct.
+Cancelled based on the 27g benchmark result (ALTMAP/AVX2 = 0.209×).
 
-- [ ] Implement `flush_ssse3_altmap_work` using 128-bit intrinsics
-- [ ] Benchmark on SSSE3-only hardware or emulate with `RUSTFLAGS="-C target-feature=+ssse3,-avx2"`
-- [ ] Gate behind a correctness test identical to 27e's
+SSSE3 vectors are 128 bits (half of AVX2's 256 bits), so each plane section
+requires twice as many loop iterations for the same slice.  The dep-matrix overhead
+per byte is identical to AVX2, meaning ALTMAP/SSSE3 would achieve the same ≈0.21×
+ratio — still ~5× slower than the nibble-shuffle SSSE3 path.  There is no
+architectural reason to implement this variant.
 
 ### Definition of done
 
