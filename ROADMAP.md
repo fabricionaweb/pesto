@@ -1561,25 +1561,26 @@ Add the data-layout infrastructure that the Shuffle2x kernel depends on:
 - [ ] `BenchPath::Avx2Shuffle2x` under `bench-internals` feature.
 - [ ] Roundtrip test: `prepare → finish` produces original data.
 
-### 28b — `flush_avx2_shuffle2x_work` kernel (large, 1 day)
+### 28b — `flush_avx2_shuffle2x_work` kernel ✅ (large, 1 day)
 
-The hot-path kernel that accumulates queued slices into Shuffle2x recovery buffers:
+The hot-path kernel that accumulates queued slices into Shuffle2x recovery buffers.
+Implemented in `encoder.rs::flush_avx2_shuffle2x_work`.
 
-- [ ] Pre-compute 4-register coefficient tables per (recovery_block, queued_slice)
-      pair: `shufNormLo`, `shufSwapLo`, `shufNormHi`, `shufSwapHi` — packed from
-      the `prodLo/Hi0-3` polynomial powers following parpar's table layout.
-- [ ] 2-way recovery block unroll (2 blocks × 4 table regs = 8 regs for tables).
-- [ ] Inner loop per 32 bytes:
-      1. `_mm256_load_si256(src)` — prepared input, guaranteed aligned
-      2. Extract lo nibbles (AND mask_f)
-      3. `shufNormLoX(ti)` → result_X ; `shufSwapLoX(ti)` → swapped_X (both blocks)
-      4. Extract hi nibbles (SRLI + AND)
-      5. `shufNormHiX(ti)` → XOR into result_X ; `shufSwapHiX(ti)` → XOR into swapped_X
-      6. `vperm2i128(swapped_X, 0x01)` → lane-crossed partial
-      7. XOR result_X with permuted, XOR with load(dst), store
-- [ ] Scalar tail for remainder bytes.
-- [ ] Gate behind `#[cfg(target_arch = "x86_64")]` + AVX2 detection.
-- [ ] Correctness: compare byte-for-byte vs `flush_avx2_work` on known inputs.
+Algorithm: for each 32-byte input chunk, `separate_low_high` (vpshufb + vpermq 0xD8) puts
+lo-bytes in lane 0 and hi-bytes in lane 1 of a YMM register.  A `vperm2i128` swaps lanes to
+create the "swapped" operand for the cross-lane nibble contributions.  4 PSHUFB + 2 XOR
+then produce the correct result in Shuffle2x layout directly, without the
+AND/SHIFT/OR packing needed by the plain nibble-shuffle path.
+
+- [x] Pre-compute 4-register coefficient tables `(tNormA, tNormB, tSwapA, tSwapB)` per
+      (recovery_block, queued_slice) pair.  Each `__m256i` packs two 16-entry tables
+      into its two 128-bit lanes: `tNormA = [lane0: loN0, lane1: hiN2]`, etc.
+- [x] 4-way recovery block unroll (4 blocks × 4 table regs = 16 regs for tables).
+- [x] Inner loop per 32 bytes: separate_low_high + vperm2i128 + 4 PSHUFB + 2 XOR + dst^=store.
+- [x] Slice sizes are always multiples of 32; no scalar tail required.
+- [x] Gate behind `#[cfg(target_arch = "x86_64")]` + AVX2 runtime detection.
+- [x] Correctness tests: `new_shuffle2x_produces_correct_recovery_data` and
+      `new_shuffle2x_exponent_start_offset` compare byte-for-byte vs normal encoder.
 
 ### 28c — Dual-slice processing (medium, 3–4 h)
 

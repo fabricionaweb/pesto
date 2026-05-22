@@ -48,6 +48,26 @@ type Ssse3Table = (
     [u16; 256],
 );
 
+/// Pre-computed AVX2/Shuffle2x coefficient table for one (recovery_block, input_slice) pair.
+/// Four 256-bit shuffle vectors where each `__m256i` packs two 16-entry nibble tables
+/// into its two 128-bit lanes, enabling the Shuffle2x kernel to use 4 PSHUFB instead of 8.
+///
+/// Layout (where loNk[n] = (gf.mul(n<<4k, c) & 0xFF), hiNk[n] = (gf.mul(n<<4k, c) >> 8)):
+///   tNormA: lane0 = loN0, lane1 = hiN2
+///   tNormB: lane0 = loN1, lane1 = hiN3
+///   tSwapA: lane0 = loN2, lane1 = hiN0
+///   tSwapB: lane0 = loN3, lane1 = hiN1
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+type Avx2Shuffle2xTable = (
+    __m256i,    // tNormA
+    __m256i,    // tNormB
+    __m256i,    // tSwapA
+    __m256i,    // tSwapB
+    [u16; 256], // scalar table_low  (fallback / for the test harness)
+    [u16; 256], // scalar table_high
+);
+
 /// Pre-computed AVX2 coefficient table for one (recovery_block, input_slice) pair.
 /// Eight 256-bit shuffle vectors covering the four nibble × two byte-half combinations,
 /// plus full 256-entry lookup tables for the scalar tail handler.
@@ -440,16 +460,14 @@ impl RecoveryEncoder {
             return;
         }
 
-        // Shuffle2x path: AVX2 nibble-shuffle kernel with prepared layout (Phase 28).
+        // Shuffle2x path: AVX2 nibble-shuffle kernel with Shuffle2x buffer layout (Phase 28b).
         #[cfg(target_arch = "x86_64")]
         if matches!(self.buffers, RecoveryBufferSet::Shuffle2x(_)) {
             if std::is_x86_feature_detected!("avx2") {
-                // Kernel not yet implemented (28b); drain without processing for now.
-                let queued = std::mem::take(&mut self.queued_slices);
-                self.next_index += queued.len();
-                self.recycle_queue(queued);
+                unsafe { self.flush_avx2_shuffle2x() };
                 return;
             }
+            // No AVX2: Shuffle2x path is unsupported; drain without processing.
             let queued = std::mem::take(&mut self.queued_slices);
             self.next_index += queued.len();
             self.recycle_queue(queued);
@@ -490,13 +508,10 @@ impl RecoveryEncoder {
                     return;
                 },
                 #[cfg(target_arch = "x86_64")]
-                BenchPath::Avx2Shuffle2x => {
-                    // Kernel not yet implemented (28b); no-op placeholder.
-                    let queued = std::mem::take(&mut self.queued_slices);
-                    self.next_index += queued.len();
-                    self.recycle_queue(queued);
+                BenchPath::Avx2Shuffle2x => unsafe {
+                    self.flush_avx2_shuffle2x();
                     return;
-                }
+                },
             }
         }
 
@@ -1200,6 +1215,393 @@ impl RecoveryEncoder {
                                                 pw = pw.add(1);
                                                 p_in = p_in.add(2);
                                             }
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    }
+                }
+            });
+    }
+
+    /// AVX2 Shuffle2x flush: accumulates queued slices into Shuffle2x recovery buffers.
+    ///
+    /// Input slices are in normal u16 layout. Recovery buffers are in Shuffle2x layout
+    /// (lo-bytes in lane 0, hi-bytes in lane 1 of each 32-byte chunk). Uses 4 PSHUFB
+    /// per recovery block per 32-byte input chunk instead of the 8 used by the plain
+    /// AVX2 nibble-shuffle path, achieving ~33% fewer instructions per block.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn flush_avx2_shuffle2x(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+
+        let RecoveryBufferSet::Shuffle2x(ref mut bufs) = self.buffers else {
+            unreachable!("flush_avx2_shuffle2x called on non-Shuffle2x encoder");
+        };
+
+        unsafe {
+            Self::flush_avx2_shuffle2x_work(
+                bufs,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn flush_avx2_shuffle2x_work(
+        buffers: &mut [Vec<u8>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        // Byte-separation mask: within each 128-bit lane, move even-indexed bytes
+        // (lo bytes of u16 words) to positions 0-7 and odd-indexed bytes (hi bytes)
+        // to positions 8-15.  Combined with vpermq 0xD8 this is `separate_low_high`.
+        let sep_mask = _mm256_set_epi8(
+            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 1
+            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 0
+        );
+        let mask_f = _mm256_set1_epi8(0x0F_u8 as i8);
+
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+
+        // Pre-build 4-register Shuffle2x coefficient tables in parallel.
+        // For coefficient c, 4-bit nibble index n (0..15):
+        //   loNk[n] = (gf.mul(n << 4k, c) & 0xFF) as u8
+        //   hiNk[n] = (gf.mul(n << 4k, c) >> 8) as u8
+        // Table layout (each __m256i packs two 128-bit sub-tables into its two lanes):
+        //   tNormA: lane0 = loN0, lane1 = hiN2
+        //   tNormB: lane0 = loN1, lane1 = hiN3
+        //   tSwapA: lane0 = loN2, lane1 = hiN0
+        //   tSwapB: lane0 = loN3, lane1 = hiN1
+        let all_tables: Vec<Avx2Shuffle2xTable> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| unsafe {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+
+                let mut lo_n0 = [0u8; 16];
+                let mut lo_n1 = [0u8; 16];
+                let mut lo_n2 = [0u8; 16];
+                let mut lo_n3 = [0u8; 16];
+                let mut hi_n0 = [0u8; 16];
+                let mut hi_n1 = [0u8; 16];
+                let mut hi_n2 = [0u8; 16];
+                let mut hi_n3 = [0u8; 16];
+
+                for n in 0..16usize {
+                    let r0 = gf.mul(n as u16, coeff);
+                    lo_n0[n] = (r0 & 0xFF) as u8;
+                    hi_n0[n] = (r0 >> 8) as u8;
+                    let r1 = gf.mul((n as u16) << 4, coeff);
+                    lo_n1[n] = (r1 & 0xFF) as u8;
+                    hi_n1[n] = (r1 >> 8) as u8;
+                    let r2 = gf.mul((n as u16) << 8, coeff);
+                    lo_n2[n] = (r2 & 0xFF) as u8;
+                    hi_n2[n] = (r2 >> 8) as u8;
+                    let r3 = gf.mul((n as u16) << 12, coeff);
+                    lo_n3[n] = (r3 & 0xFF) as u8;
+                    hi_n3[n] = (r3 >> 8) as u8;
+                }
+
+                let t_norm_a = _mm256_set_m128i(
+                    _mm_loadu_si128(hi_n2.as_ptr() as *const __m128i),
+                    _mm_loadu_si128(lo_n0.as_ptr() as *const __m128i),
+                );
+                let t_norm_b = _mm256_set_m128i(
+                    _mm_loadu_si128(hi_n3.as_ptr() as *const __m128i),
+                    _mm_loadu_si128(lo_n1.as_ptr() as *const __m128i),
+                );
+                let t_swap_a = _mm256_set_m128i(
+                    _mm_loadu_si128(hi_n0.as_ptr() as *const __m128i),
+                    _mm_loadu_si128(lo_n2.as_ptr() as *const __m128i),
+                );
+                let t_swap_b = _mm256_set_m128i(
+                    _mm_loadu_si128(hi_n1.as_ptr() as *const __m128i),
+                    _mm_loadu_si128(lo_n3.as_ptr() as *const __m128i),
+                );
+
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255usize {
+                    table_low[b] = gf.mul(b as u16, coeff);
+                    table_high[b] = gf.mul((b as u16) << 8, coeff);
+                }
+
+                (
+                    t_norm_a, t_norm_b, t_swap_a, t_swap_b, table_low, table_high,
+                )
+            })
+            .collect();
+
+        // 32 KiB byte chunks per recovery buffer = 16384 words, matching the
+        // flush_avx2_work chunk granularity.
+        let chunk_size_bytes = 32768usize;
+
+        buffers
+            .par_chunks_mut(4)
+            .enumerate()
+            .for_each(|(group_idx, buf_group)| {
+                let i = group_idx * 4;
+                match buf_group {
+                    [buf_a, buf_b, buf_c, buf_d] => {
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size_bytes)
+                            .zip(buf_b.par_chunks_mut(chunk_size_bytes))
+                            .zip(buf_c.par_chunks_mut(chunk_size_bytes))
+                            .zip(buf_d.par_chunks_mut(chunk_size_bytes))
+                            .enumerate()
+                            .for_each(
+                                |(chunk_idx, (((chunk_a, chunk_b), chunk_c), chunk_d))| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size_bytes;
+                                    let byte_len = chunk_a.len();
+                                    let blocks_32 = byte_len / 32;
+
+                                    for q_idx in 0..n_queued {
+                                        let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
+                                            all_tables[base_a + q_idx];
+                                        let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
+                                            all_tables[base_b + q_idx];
+                                        let (tna_c, tnb_c, tsa_c, tsb_c, _, _) =
+                                            all_tables[base_c + q_idx];
+                                        let (tna_d, tnb_d, tsa_d, tsb_d, _, _) =
+                                            all_tables[base_d + q_idx];
+
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                        let mut ptr_in =
+                                            slice_chunk.as_ptr() as *const __m256i;
+                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
+                                        let end = ptr_in.add(blocks_32);
+
+                                        while ptr_in < end {
+                                            _mm_prefetch(
+                                                ptr_in.add(4) as *const i8,
+                                                _MM_HINT_T0,
+                                            );
+                                            let input = _mm256_loadu_si256(ptr_in);
+                                            // separate_low_high: lane0 = lo bytes, lane1 = hi
+                                            let s = _mm256_permute4x64_epi64(
+                                                _mm256_shuffle_epi8(input, sep_mask),
+                                                0xD8,
+                                            );
+                                            // swap lanes for cross-lane contributions
+                                            let sw =
+                                                _mm256_permute2x128_si256(s, s, 0x01);
+
+                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
+                                            let hi_nib_s = _mm256_and_si256(
+                                                _mm256_srli_epi16(s, 4),
+                                                mask_f,
+                                            );
+                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
+                                            let hi_nib_sw = _mm256_and_si256(
+                                                _mm256_srli_epi16(sw, 4),
+                                                mask_f,
+                                            );
+
+                                            // s2x_block: 4 PSHUFB + 2 XOR = one GF(2^16) madd
+                                            // into a Shuffle2x recovery buffer.
+                                            // norm  = pshufb(tNormA, lo_nib_s)  ^ pshufb(tNormB, hi_nib_s)
+                                            // swap  = pshufb(tSwapA, lo_nib_sw) ^ pshufb(tSwapB, hi_nib_sw)
+                                            // result.lane0 = full lo-byte, result.lane1 = full hi-byte ✓
+                                            macro_rules! s2x_block {
+                                                ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
+                                                    let norm = _mm256_xor_si256(
+                                                        _mm256_shuffle_epi8($ta, lo_nib_s),
+                                                        _mm256_shuffle_epi8($tb, hi_nib_s),
+                                                    );
+                                                    let swap = _mm256_xor_si256(
+                                                        _mm256_shuffle_epi8($tc, lo_nib_sw),
+                                                        _mm256_shuffle_epi8($td, hi_nib_sw),
+                                                    );
+                                                    _mm256_storeu_si256(
+                                                        $ptr,
+                                                        _mm256_xor_si256(
+                                                            _mm256_loadu_si256($ptr),
+                                                            _mm256_xor_si256(norm, swap),
+                                                        ),
+                                                    );
+                                                }};
+                                            }
+
+                                            s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
+                                            s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
+                                            s2x_block!(tna_c, tnb_c, tsa_c, tsb_c, ptr_c);
+                                            s2x_block!(tna_d, tnb_d, tsa_d, tsb_d, ptr_d);
+
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_a = ptr_a.add(1);
+                                            ptr_b = ptr_b.add(1);
+                                            ptr_c = ptr_c.add(1);
+                                            ptr_d = ptr_d.add(1);
+                                        }
+                                    }
+                                },
+                            );
+                    }
+                    [buf_a, buf_b] => {
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size_bytes)
+                            .zip(buf_b.par_chunks_mut(chunk_size_bytes))
+                            .enumerate()
+                            .for_each(|(chunk_idx, (chunk_a, chunk_b))| unsafe {
+                                let byte_offset = chunk_idx * chunk_size_bytes;
+                                let byte_len = chunk_a.len();
+                                let blocks_32 = byte_len / 32;
+
+                                for q_idx in 0..n_queued {
+                                    let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
+                                        all_tables[base_a + q_idx];
+                                    let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
+                                        all_tables[base_b + q_idx];
+
+                                    let slice_chunk =
+                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                    let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                                    let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
+                                    let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
+                                    let end = ptr_in.add(blocks_32);
+
+                                    while ptr_in < end {
+                                        _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
+                                        let input = _mm256_loadu_si256(ptr_in);
+                                        let s = _mm256_permute4x64_epi64(
+                                            _mm256_shuffle_epi8(input, sep_mask),
+                                            0xD8,
+                                        );
+                                        let sw = _mm256_permute2x128_si256(s, s, 0x01);
+
+                                        let lo_nib_s = _mm256_and_si256(s, mask_f);
+                                        let hi_nib_s = _mm256_and_si256(
+                                            _mm256_srli_epi16(s, 4),
+                                            mask_f,
+                                        );
+                                        let lo_nib_sw = _mm256_and_si256(sw, mask_f);
+                                        let hi_nib_sw = _mm256_and_si256(
+                                            _mm256_srli_epi16(sw, 4),
+                                            mask_f,
+                                        );
+
+                                        macro_rules! s2x_block {
+                                            ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
+                                                let norm = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($ta, lo_nib_s),
+                                                    _mm256_shuffle_epi8($tb, hi_nib_s),
+                                                );
+                                                let swap = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($tc, lo_nib_sw),
+                                                    _mm256_shuffle_epi8($td, hi_nib_sw),
+                                                );
+                                                _mm256_storeu_si256(
+                                                    $ptr,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256($ptr),
+                                                        _mm256_xor_si256(norm, swap),
+                                                    ),
+                                                );
+                                            }};
+                                        }
+
+                                        s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
+                                        s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
+
+                                        ptr_in = ptr_in.add(1);
+                                        ptr_a = ptr_a.add(1);
+                                        ptr_b = ptr_b.add(1);
+                                    }
+                                }
+                            });
+                    }
+                    rest => {
+                        for (j, buf) in rest.iter_mut().enumerate() {
+                            let base = (i + j) * n_queued;
+                            buf.par_chunks_mut(chunk_size_bytes).enumerate().for_each(
+                                |(chunk_idx, chunk)| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size_bytes;
+                                    let byte_len = chunk.len();
+                                    let blocks_32 = byte_len / 32;
+
+                                    for q_idx in 0..n_queued {
+                                        let (tna, tnb, tsa, tsb, _, _) =
+                                            all_tables[base + q_idx];
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                        let mut ptr_buf = chunk.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                                        let end = ptr_in.add(blocks_32);
+
+                                        while ptr_in < end {
+                                            _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
+                                            let input = _mm256_loadu_si256(ptr_in);
+                                            let s = _mm256_permute4x64_epi64(
+                                                _mm256_shuffle_epi8(input, sep_mask),
+                                                0xD8,
+                                            );
+                                            let sw = _mm256_permute2x128_si256(s, s, 0x01);
+                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
+                                            let hi_nib_s = _mm256_and_si256(
+                                                _mm256_srli_epi16(s, 4),
+                                                mask_f,
+                                            );
+                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
+                                            let hi_nib_sw = _mm256_and_si256(
+                                                _mm256_srli_epi16(sw, 4),
+                                                mask_f,
+                                            );
+                                            let norm = _mm256_xor_si256(
+                                                _mm256_shuffle_epi8(tna, lo_nib_s),
+                                                _mm256_shuffle_epi8(tnb, hi_nib_s),
+                                            );
+                                            let swap = _mm256_xor_si256(
+                                                _mm256_shuffle_epi8(tsa, lo_nib_sw),
+                                                _mm256_shuffle_epi8(tsb, hi_nib_sw),
+                                            );
+                                            _mm256_storeu_si256(
+                                                ptr_buf,
+                                                _mm256_xor_si256(
+                                                    _mm256_loadu_si256(ptr_buf),
+                                                    _mm256_xor_si256(norm, swap),
+                                                ),
+                                            );
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_buf = ptr_buf.add(1);
                                         }
                                     }
                                 },
@@ -3468,6 +3870,107 @@ mod tests {
             assert_eq!(
                 altmap_bytes, normal_bytes,
                 "size mismatch at slice_words={slice_words}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_shuffle2x_produces_correct_recovery_data() {
+        // Verify that new_shuffle2x() produces byte-identical recovery data to new().
+        // Only meaningful on AVX2 hardware; skip otherwise.
+        #[cfg(target_arch = "x86_64")]
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        // slice_size must be a multiple of 32 bytes (16 u16 words) for Shuffle2x.
+        let slice_size = 64usize;
+        let total_slices = 5;
+        let recovery_count = 4;
+
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 19 + i * 7 + 11) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        // Normal encoder.
+        let mut enc_normal = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc_normal.add_slice(s.clone());
+        }
+        let (normal_recovery, _) = enc_normal.finish();
+
+        // Shuffle2x encoder (uses flush_avx2_shuffle2x after Phase 28b).
+        let mut enc_s2x =
+            RecoveryEncoder::new_shuffle2x(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc_s2x.add_slice(s.clone());
+        }
+        let (s2x_recovery, _) = enc_s2x.finish();
+
+        assert_eq!(
+            s2x_recovery.len(),
+            normal_recovery.len(),
+            "slice count mismatch"
+        );
+        for (i, (s2x, normal)) in s2x_recovery.iter().zip(normal_recovery.iter()).enumerate() {
+            assert_eq!(
+                s2x.data, normal.data,
+                "Shuffle2x recovery slice {i} differs from normal encoder output"
+            );
+        }
+    }
+
+    #[test]
+    fn new_shuffle2x_exponent_start_offset() {
+        // Verify that exponent_start != 0 works correctly with Shuffle2x.
+        #[cfg(target_arch = "x86_64")]
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let slice_size = 32usize;
+        let total_slices = 3;
+        let recovery_count = 2;
+        let exponent_start = 5u32;
+
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 11 + i * 3) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let mut enc_normal =
+            RecoveryEncoder::new(slice_size, total_slices, exponent_start, recovery_count);
+        for s in &slices {
+            enc_normal.add_slice(s.clone());
+        }
+        let (normal_recovery, _) = enc_normal.finish();
+
+        let mut enc_s2x = RecoveryEncoder::new_shuffle2x(
+            slice_size,
+            total_slices,
+            exponent_start,
+            recovery_count,
+        );
+        for s in &slices {
+            enc_s2x.add_slice(s.clone());
+        }
+        let (s2x_recovery, _) = enc_s2x.finish();
+
+        for (i, (s2x, normal)) in s2x_recovery.iter().zip(normal_recovery.iter()).enumerate() {
+            assert_eq!(
+                s2x.exponent, normal.exponent,
+                "exponent mismatch at block {i}"
+            );
+            assert_eq!(
+                s2x.data, normal.data,
+                "Shuffle2x recovery slice {i} differs from normal encoder output (exponent_start={exponent_start})"
             );
         }
     }
