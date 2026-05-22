@@ -1023,11 +1023,8 @@ While running the existing `simd_recovery_matches_scalar_for_larger_slices` test
 - [x] Fixed matrix byte order in `flush_avx2_gfni_work`: `let shift = (7 - row) * 8` (was `row * 8`)
 - [x] Applied the same fix to `flush_avx512_gfni_work` (same instruction convention)
 - [x] Verified AVX2+GFNI path correct on i5-14400 via `simd_recovery_matches_scalar_for_larger_slices`; re-enabled in production dispatch (no feature flag required)
-- [x] AVX-512+GFNI path kept behind `par2-avx2-gfni-unsafe` feature — same matrix fix applied but **not yet validated on real AVX-512+GFNI hardware**
-
-**PRIORITY — AVX-512+GFNI validation needed:**
-- [ ] Run `cargo test --features bench-internals -- gfni_recovery_matches_scalar` on hardware with AVX-512F + AVX-512BW + GFNI (Ice Lake, Sapphire Rapids, or equivalent) to confirm `flush_avx512_gfni_work` is correct
-- [ ] Once the test passes, remove the `par2-avx2-gfni-unsafe` gate from the AVX-512+GFNI dispatch block and enable it in production
+- [x] AVX-512+GFNI path kept behind `par2-avx2-gfni-unsafe` feature — same matrix fix applied but not yet validated on real AVX-512+GFNI hardware
+- [x] Validated `flush_avx512_gfni_work` correct on Intel Ice Lake Xeon (AWS m6i, Xeon 3rd gen Scalable) via `gfni_recovery_matches_scalar` (`--features bench-internals`); `par2-avx2-gfni-unsafe` gate removed from production dispatch
 
 ### 25a — A/B `chunk_size` in `flush_avx2_gfni_work` ✅
 

@@ -23,10 +23,7 @@ const HEAD_LEN: usize = 16 * 1024;
 
 /// Pre-computed AVX-512/GFNI coefficient table for one (recovery_block, input_slice) pair.
 /// Two 512-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
-#[cfg(all(
-    target_arch = "x86_64",
-    any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
-))]
+#[cfg(target_arch = "x86_64")]
 type Avx512GfniTable = (__m512i, __m512i, [u16; 256], [u16; 256]);
 
 /// Pre-computed AVX2/GFNI coefficient table for one (recovery_block, input_slice) pair.
@@ -274,9 +271,9 @@ impl RecoveryEncoder {
             }
         }
 
-        // AVX-512+GFNI path: matrix fix applied but not yet validated on real
-        // AVX-512 hardware. Keep behind the unsafe feature until confirmed.
-        #[cfg(all(target_arch = "x86_64", feature = "par2-avx2-gfni-unsafe"))]
+        // AVX-512+GFNI path: verified correct on Intel Ice Lake Xeon (AWS m6i)
+        // via gfni_recovery_matches_scalar (bench-internals feature).
+        #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512bw")
             && std::is_x86_feature_detected!("gfni")
@@ -1439,10 +1436,7 @@ impl RecoveryEncoder {
     ///   3. Fold the two qword results within each lane (bsrli + xor) to produce
     ///      the combined lo and hi result bytes.
     ///   4. Re-interleave with `vunpcklbw` and XOR into the recovery buffer.
-    #[cfg(all(
-        target_arch = "x86_64",
-        any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_gfni(&mut self) {
         let start_index = self.next_index;
@@ -1486,10 +1480,7 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        any(feature = "bench-internals", feature = "par2-avx2-gfni-unsafe")
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_gfni_work(
         buffers: &mut [Vec<u16>],
