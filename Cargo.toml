@@ -44,9 +44,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
 # Never enable this in production builds.
 bench-internals = []
-# Re-enable the GFNI PAR2 paths (AVX2+GFNI and AVX-512+GFNI). Both are
-# disabled in production until gfni_recovery_matches_scalar passes on real
-# GFNI hardware. Enable only for testing/benchmarking the fix.
+# Exposes the AVX2+GFNI and AVX-512+GFNI flush paths for testing/benchmarking.
+# Both paths are now enabled in production dispatch; this feature is only needed
+# to force a specific path via BenchPath in tests or benchmarks.
 par2-avx2-gfni-unsafe = []
 
 [dev-dependencies]
