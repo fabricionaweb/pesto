@@ -923,6 +923,19 @@ async fn producer(
 
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let worker_opt: Option<Par2Worker> = if rec_count > 0 {
+            // On AVX2-only hardware (no GFNI), use the Shuffle2x encoder which uses
+            // 4 PSHUFB per block instead of 8, yielding ~20-30% more throughput.
+            // On GFNI hardware the normal encoder takes the GFNI path instead.
+            #[cfg(target_arch = "x86_64")]
+            let enc = if std::is_x86_feature_detected!("avx2")
+                && !std::is_x86_feature_detected!("gfni")
+                && par2_slice_size.is_multiple_of(32)
+            {
+                RecoveryEncoder::new_shuffle2x(par2_slice_size, total_slices, exp_start, rec_count)
+            } else {
+                RecoveryEncoder::new(par2_slice_size, total_slices, exp_start, rec_count)
+            };
+            #[cfg(not(target_arch = "x86_64"))]
             let enc = RecoveryEncoder::new(par2_slice_size, total_slices, exp_start, rec_count);
             // On passes with many recovery blocks, increasing the queue size
             // (cache blocking) amortizes the flush cost over more input data.

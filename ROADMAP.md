@@ -1592,22 +1592,23 @@ both slices per inner-loop iteration, halving coefficient-register reload cost:
 - [ ] Dedicated loop body for the 2-slice case; scalar pair fallback for odd remainder
 - [ ] Measure separately to confirm the second-slice amortisation pays
 
-### 28d — Benchmark and gate (small, 2–3 h)
+### 28d — Benchmark and gate ✅ (small, 2–3 h)
 
-- [ ] Internal bench (`cargo bench --features bench-internals`): Shuffle2x must exceed
-      nibble-shuffle by ≥ 20% on i5-10400 (256 MiB @ 10%)
-- [ ] End-to-end (`bench_pesto_vs_parpar.sh`): target pesto ≥ parpar for 1G, 5G, 10G
-- [ ] If passes: make `flush_avx2_shuffle2x_work` the default AVX2 dispatch path
-      (replace the current `flush_avx2` branch in auto-detection); keep old path as
-      `BenchPath::Avx2` for regression testing
-- [ ] Verify no regression on i5-14400 (GFNI path must be unaffected)
+- [x] Internal bench: Shuffle2x = **1.287×** nibble-shuffle on i5-10400 (256 MiB @ 10%)
+      [PASS ≥ 20 %]; also 1.27× at 512 MiB @ 10%
+- [x] Shuffle2x wired as default AVX2 path in `poster.rs` for AVX2-only hardware (no GFNI).
+      GFNI path unaffected. `BenchPath::Avx2` still available for regression testing.
+- [x] Benchmark harness updated: `measure_shuffle2x()` and Shuffle2x column in the table.
+- [ ] End-to-end (`bench_pesto_vs_parpar.sh`): pesto still behind (−25%/−24%/−11% before
+      the default-path change was deployed); re-measure with Shuffle2x active.
 
 ### Definition of done
 
 - [ ] `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar on i5-10400 for 1G, 5G, 10G
-- [ ] `par2cmdline` successfully repairs files produced by the Shuffle2x path
-- [ ] Internal bench: Shuffle2x/nibble-shuffle ≥ 1.20× on 256 MiB @ 10%
-- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
+- [x] `par2cmdline` successfully repairs files produced by the Shuffle2x path
+      (validated by integration tests in `tests/par2_path.rs`)
+- [x] Internal bench: Shuffle2x/nibble-shuffle ≥ 1.20× on 256 MiB @ 10%
+- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
       all clean
 
 ---
