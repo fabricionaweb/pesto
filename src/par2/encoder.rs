@@ -70,18 +70,22 @@ type Avx2Table = (
 /// `Normal` holds one `Vec<u16>` per recovery block (the existing layout).
 /// `Altmap` holds one `Vec<u8>` per recovery block in ALTMAP bit-plane format
 /// (Phase 27d/27e); both variants occupy the same total memory.
+/// `Shuffle2x` holds one `Vec<u8>` per recovery block in the Shuffle2x layout
+/// (Phase 28a): lo-bytes in lane 0, hi-bytes in lane 1 of each 32-byte chunk.
 pub(super) enum RecoveryBufferSet {
     Normal(Vec<Vec<u16>>),
     /// Each inner `Vec<u8>` has length `altmap_size(slice_words)` = `slice_words * 2`.
     Altmap(Vec<Vec<u8>>),
+    /// Each inner `Vec<u8>` has length `shuffle2x_buffer_size(slice_words)` = `slice_words * 2`.
+    Shuffle2x(Vec<Vec<u8>>),
 }
 
 impl RecoveryBufferSet {
-    /// Borrow the normal (u16) buffers.  Panics when called on the Altmap variant.
+    /// Borrow the normal (u16) buffers.  Panics when called on the Altmap/Shuffle2x variant.
     pub(super) fn as_normal_mut(&mut self) -> &mut Vec<Vec<u16>> {
         match self {
             Self::Normal(b) => b,
-            Self::Altmap(_) => panic!("expected Normal recovery buffers"),
+            Self::Altmap(_) | Self::Shuffle2x(_) => panic!("expected Normal recovery buffers"),
         }
     }
 
@@ -90,7 +94,7 @@ impl RecoveryBufferSet {
     pub(super) fn len(&self) -> usize {
         match self {
             Self::Normal(b) => b.len(),
-            Self::Altmap(b) => b.len(),
+            Self::Altmap(b) | Self::Shuffle2x(b) => b.len(),
         }
     }
 }
@@ -104,6 +108,16 @@ impl RecoveryBufferSet {
 /// Panics if `slice_words` is not a multiple of 16.
 pub fn altmap_buffer_size(slice_words: usize) -> usize {
     super::altmap::altmap_size(slice_words)
+}
+
+/// Returns the size in bytes of one Shuffle2x recovery buffer for `slice_words`
+/// GF(2^16) words.  Equal to `slice_words * 2` — same footprint as normal layout.
+///
+/// # Panics
+///
+/// Panics if `slice_words` is not a multiple of 16.
+pub fn shuffle2x_buffer_size(slice_words: usize) -> usize {
+    super::shuffle2x::shuffle2x_buffer_size(slice_words)
 }
 
 /// One finished recovery slice.
@@ -170,6 +184,8 @@ pub enum BenchPath {
     Avx512Gfni,
     #[cfg(target_arch = "x86_64")]
     Avx2Altmap,
+    #[cfg(target_arch = "x86_64")]
+    Avx2Shuffle2x,
 }
 
 impl RecoveryEncoder {
@@ -260,6 +276,48 @@ impl RecoveryEncoder {
             logbases: input_logbases(total_input_slices),
             exponent_start,
             buffers: RecoveryBufferSet::Altmap(vec![vec![0u8; buf_bytes]; recovery_count]),
+            next_index: 0,
+            queued_slices: Vec::with_capacity(64),
+            free_buffers: Vec::new(),
+            flush_limit_bytes: 256 * 1024 * 1024,
+            compute_checksums: false,
+            pending_checksums: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            forced_path: None,
+            #[cfg(target_arch = "x86_64")]
+            dep_tables: Self::build_dep_tables(),
+        }
+    }
+
+    /// Create an encoder that stores recovery buffers in Shuffle2x layout.
+    ///
+    /// Identical to [`new`] in every respect except that the internal recovery
+    /// buffers use the Shuffle2x layout (Phase 28a): lo-bytes in lane 0, hi-bytes
+    /// in lane 1 of each 32-byte chunk.  The `flush_avx2_shuffle2x` path will
+    /// use these directly; `finish()` converts them back to normal layout before
+    /// returning `RecoverySlice`s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slice_size` is not a positive multiple of 32 bytes.
+    pub fn new_shuffle2x(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        assert!(
+            slice_size > 0 && slice_size.is_multiple_of(32),
+            "Shuffle2x encoder requires slice_size to be a positive multiple of 32 bytes, got {slice_size}"
+        );
+        let slice_words = slice_size / 2;
+        let buf_bytes = shuffle2x_buffer_size(slice_words);
+        Self {
+            gf: Gf16::new(),
+            slice_words,
+            logbases: input_logbases(total_input_slices),
+            exponent_start,
+            buffers: RecoveryBufferSet::Shuffle2x(vec![vec![0u8; buf_bytes]; recovery_count]),
             next_index: 0,
             queued_slices: Vec::with_capacity(64),
             free_buffers: Vec::new(),
@@ -382,6 +440,22 @@ impl RecoveryEncoder {
             return;
         }
 
+        // Shuffle2x path: AVX2 nibble-shuffle kernel with prepared layout (Phase 28).
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.buffers, RecoveryBufferSet::Shuffle2x(_)) {
+            if std::is_x86_feature_detected!("avx2") {
+                // Kernel not yet implemented (28b); drain without processing for now.
+                let queued = std::mem::take(&mut self.queued_slices);
+                self.next_index += queued.len();
+                self.recycle_queue(queued);
+                return;
+            }
+            let queued = std::mem::take(&mut self.queued_slices);
+            self.next_index += queued.len();
+            self.recycle_queue(queued);
+            return;
+        }
+
         // When bench-internals is active a forced path overrides auto-detection.
         #[cfg(feature = "bench-internals")]
         if let Some(path) = self.forced_path {
@@ -415,6 +489,14 @@ impl RecoveryEncoder {
                     self.flush_avx2_altmap();
                     return;
                 },
+                #[cfg(target_arch = "x86_64")]
+                BenchPath::Avx2Shuffle2x => {
+                    // Kernel not yet implemented (28b); no-op placeholder.
+                    let queued = std::mem::take(&mut self.queued_slices);
+                    self.next_index += queued.len();
+                    self.recycle_queue(queued);
+                    return;
+                }
             }
         }
 
@@ -3028,6 +3110,18 @@ impl RecoveryEncoder {
                     RecoverySlice {
                         exponent: exponent_start + i as u32,
                         data,
+                    }
+                })
+                .collect(),
+            RecoveryBufferSet::Shuffle2x(bufs) => bufs
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, s2x_buf)| {
+                    let mut normal = vec![0u8; s2x_buf.len()];
+                    super::shuffle2x::from_shuffle2x(&s2x_buf, &mut normal);
+                    RecoverySlice {
+                        exponent: exponent_start + i as u32,
+                        data: normal,
                     }
                 })
                 .collect(),
