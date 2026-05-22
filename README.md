@@ -325,7 +325,7 @@ CPU feature detection:
 
 | Path | Requirement | Notes |
 |------|------------|-------|
-| GFNI + AVX-512 | AVX-512F + AVX-512BW + GFNI | Pending validation on real hardware; enable with the `par2-avx2-gfni-unsafe` Cargo feature |
+| GFNI + AVX-512 | AVX-512F + AVX-512BW + GFNI | Verified on Intel Ice Lake Xeon; enabled by default |
 | GFNI + AVX2 | AVX2 + GFNI (Ice Lake+, Zen 4+) | Default fast path on modern x86-64 |
 | AVX2 | AVX2 (Haswell+) | Fallback for CPUs without GFNI |
 | SSSE3 | SSSE3 (Sandy Bridge+) | Covers nearly all x86-64 CPUs since 2007 |
