@@ -127,7 +127,23 @@ high-latency links (>50 ms RTT).
 Replace the byte-at-a-time yEnc loop with a SIMD-accelerated implementation
 that processes 16–32 bytes per cycle.
 
-### 26a — SSSE3 baseline (x86-64)
+Complexity levels, in order: scalar correctness → SSSE3 (16-byte) →
+AVX2 (32-byte) → buffer pre-computation. Each level uses the previous
+level's tests as a golden reference before any SIMD code is merged.
+
+### 26a — Scalar baseline with full test coverage *(low complexity)*
+
+- [ ] Extract the yEnc encode loop into a pure function `encode_scalar(input: &[u8], output: &mut Vec<u8>)` with no side-effects.
+- [ ] Unit tests covering:
+  - All four special bytes (`0x00`, `0x0A`, `0x0D`, `0x3D`) at every position (first, middle, last, consecutive).
+  - Positional escapes: space (`0x20`) and tab (`0x09`) at line start (col 0) and at the `line_length` boundary.
+  - Wrap-around at exactly `line_length` bytes — verify `\r\n` insertion.
+  - Full 256-byte round-trip (`encode` → `decode` identity test).
+  - CRC32 value matches reference vectors from the yEnc spec.
+- [ ] Property-based test with `proptest` or `quickcheck`: for any `input: Vec<u8>`, `decode(encode(input)) == input`.
+- [ ] Micro-benchmark for the scalar path in `benches/yenc.rs` (establishes the baseline to beat).
+
+### 26b — SSSE3 baseline (x86-64) *(medium complexity)*
 
 - [ ] Add a `yenc_ssse3` feature gate (enabled on `x86_64` targets by default).
 - [ ] Implement the 16-byte-wide inner loop:
@@ -136,20 +152,22 @@ that processes 16–32 bytes per cycle.
   - Handle positional escapes (space/tab at line boundaries) as scalar epilogue.
   - Emit escaped bytes and advance output pointer.
 - [ ] Scalar fallback for the tail (< 16 bytes) and line-boundary regions.
-- [ ] Add micro-benchmark to `benches/` comparing scalar vs SSSE3 throughput.
+- [ ] Re-run the full 26a test suite against the SSSE3 path (feature-gated `#[cfg]` test).
+- [ ] Add SSSE3 vs scalar throughput comparison to the existing benchmark.
 
-### 26b — AVX2 (256-bit) path
+### 26c — AVX2 (256-bit) path *(medium-high complexity)*
 
 - [ ] Extend to 32-byte-wide loop using AVX2 intrinsics.
 - [ ] Runtime dispatch: detect `avx2` CPU feature via `std::is_x86_feature_detected!`.
-- [ ] Update `SimdPath` enum in `parmesan` to share the dispatch pattern if
-  applicable.
+- [ ] Re-run the full 26a test suite against the AVX2 path.
+- [ ] Update `SimdPath` enum in `parmesan` to share the dispatch pattern if applicable.
 
-### 26c — Line-length pre-computation
+### 26d — Line-length pre-computation *(high complexity)*
 
 - [ ] Pre-compute exact output size per input chunk (accounting for escapes and
   `\r\n` insertions) to reserve the output buffer precisely, avoiding `push`
   reallocations inside the SIMD loop.
+- [ ] Verify that the pre-computed size matches the actual output size in all 26a tests.
 
 ---
 
