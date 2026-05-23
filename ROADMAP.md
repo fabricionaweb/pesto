@@ -1626,6 +1626,68 @@ recovery-buffer load/store cost — significantly more complex (register pressur
 
 ---
 
+## Phase 29 — Close i5-14400 gap (~15% remaining)
+
+**Goal:** bring pesto to ≥ parpar on the i5-14400 (Raptor Lake hybrid, 6 P-cores + 4 E-cores,
+16 logical CPUs). Current state after Phase 28: pesto ~500 MB/s vs parpar ~587 MB/s at 10G
+(−14.6%).
+
+### Diagnosis
+
+Three candidates, ordered by expected impact:
+
+1. **Thread count** — `performance_core_count()` returns 6 (P-cores only) on a hybrid CPU.
+   Parpar likely uses all 10 physical cores (6 P + 4 E). With the encoder compute-bound at 6
+   workers, adding 4 E-cores (Gracemont, full AVX2) can close a large fraction of the gap
+   directly. The original E-core exclusion was measured on a non-hybrid i5-10400 (+2.4% there);
+   on a hybrid CPU the calculus is different.
+
+2. **Dual-slice inner loop** — the hot kernel loads each recovery buffer once per input slice
+   (`load dst → XOR → store`). Processing 2 input slices per iteration halves that load/store
+   traffic at the cost of higher register pressure. Documented as "28c proper approach" but
+   deferred because of complexity with the 4-way recovery-block unroll.
+   Pre-transformation (28c) was already tried and regressed due to memory pressure.
+
+3. **Prefetch distance** — `_mm_prefetch(ptr_in.add(4))` = 128 bytes ahead. Raptor Lake has
+   deeper pipelines; a larger distance (256–512 bytes) may hide load latency better.
+
+### 29a — E-core inclusion on hybrid CPUs ✅ (small, 1–2 h)
+
+- [x] In `performance_core_count()`: when `paired_leaders` and `solo` are both non-empty
+      (hybrid layout confirmed), return `paired_leaders.len() + solo.len()` instead of just
+      `paired_leaders.len()`. This gives all physical cores (P + E) without including
+      hyperthreads.
+- [ ] Verify detection on i5-10400 (non-hybrid: all-solo or all-paired → `physical_core_count`
+      unchanged) and i5-14400 (hybrid: 6+4=10).
+- [ ] Benchmark i5-14400 before/after: `bench_pesto_vs_parpar.sh` 1G/5G/10G.
+- [ ] If regression on non-hybrid hardware, guard with a separate code path.
+
+### 29b — Dual-slice inner loop in `flush_avx2_shuffle2x_work` ☐ (medium, 4–8 h)
+
+- [ ] Restructure the `for q_idx in 0..n_queued` loop to process `q_idx` and `q_idx+1`
+      simultaneously: load recovery buffer once, XOR contributions from two input slices,
+      store once. Halves load/store count per unit of RS work.
+- [ ] Register budget with 4-way block unroll: 4 blocks × 4 tables = 16 regs is already
+      tight; with 2 slices × 4 tables = 8 table regs per block, reduce block unroll to 2×
+      to stay within 16 YMM registers.
+- [ ] Handle odd `n_queued` with a scalar tail (single-slice last iteration).
+- [ ] Correctness: compare byte-for-byte vs normal encoder (existing test harness).
+- [ ] Benchmark: internal `bench-internals` before/after.
+
+### 29c — Prefetch distance tuning ☐ (tiny, 30 min)
+
+- [ ] Try `ptr_in.add(8)` (256 bytes) and `ptr_in.add(16)` (512 bytes) in the
+      `flush_avx2_shuffle2x_work` inner loop.
+- [ ] Measure with `bench-internals` on i5-14400; keep the best value.
+
+### Definition of done
+
+- [ ] `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar on i5-14400 for 5G and 10G
+- [ ] No regression on i5-10400 (still ≥ parpar at 10G)
+- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` clean
+
+---
+
 ## Phase 26 — Verbose Mode & Diagnostics
 
 Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
