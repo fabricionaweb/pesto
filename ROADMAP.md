@@ -153,12 +153,18 @@ level's tests as a golden reference before any SIMD code is merged.
 - [x] 9 golden-reference tests verify AVX2 output matches `encode_scalar` exactly.
 - [x] Benchmark: **~1470 MB/s** (≈2.8× scalar). For `line_len=128` the safe zone is 126 bytes (3 AVX2 + 1 SSSE3 chunks), so SSSE3 edges it out at this line length; longer lines favour AVX2.
 
-### 26d — Line-length pre-computation *(high complexity)*
+### 26d — Buffer pre-reservation *(high complexity)* ✅
 
-- [ ] Pre-compute exact output size per input chunk (accounting for escapes and
-  `\r\n` insertions) to reserve the output buffer precisely, avoiding `push`
-  reallocations inside the SIMD loop.
-- [ ] Verify that the pre-computed size matches the actual output size in all 26a tests.
+- [x] Add `pub fn encoded_size(data, line_len) -> usize`: exact scalar count of
+  output bytes (escaped pairs + CRLF termintors). Useful for callers that need
+  the buffer size before encoding (NZB builders, fixed-size writers).
+- [x] Replace per-chunk `reserve(16/32)` calls inside SIMD loops with a single
+  O(1) upper-bound reserve at function entry:
+  `data.len() * 2 + (data.len() / line_len + 1) * 2` (always sufficient).
+  Calling `encoded_size()` inside SIMD encodes would add a full O(n) scalar
+  pass and eliminate the SIMD speedup — O(1) upper bound is the right trade-off.
+- [x] 6 new tests verify `encoded_size` matches actual output length for all
+  boundary conditions and a 750 KB payload.
 
 ---
 
