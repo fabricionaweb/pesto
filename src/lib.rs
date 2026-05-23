@@ -34,7 +34,7 @@ pub mod nfo;
 pub mod nntp;
 pub mod notify;
 pub mod nzb;
-pub mod par2;
+pub use pesto_par2 as par2;
 pub mod poster;
 pub mod progress;
 pub mod resume;

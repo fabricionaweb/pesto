@@ -22,9 +22,9 @@ use crate::article::{
 };
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
-use crate::par2::encoder::{FileHasher, RecoveryEncoder};
-use crate::par2::layout;
-use crate::par2::packet::{self, SliceChecksum};
+use pesto_par2::encoder::{FileHasher, RecoveryEncoder};
+use pesto_par2::layout;
+use pesto_par2::packet::{self, SliceChecksum};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
 use crate::walk::InputFile;
@@ -58,9 +58,9 @@ struct Par2Worker {
     free_rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
     /// The worker thread; held until [`Par2Worker::finish`] is called.
     handle: std::thread::JoinHandle<(
-        Vec<crate::par2::encoder::RecoverySlice>,
+        Vec<pesto_par2::encoder::RecoverySlice>,
         Vec<SliceChecksum>,
-        Vec<crate::par2::encoder::FileHashes>,
+        Vec<pesto_par2::encoder::FileHashes>,
     )>,
 }
 
@@ -74,14 +74,14 @@ impl Par2Worker {
         let handle = std::thread::spawn(move || {
             let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
             let (hash_tx, hash_rx) =
-                std::sync::mpsc::sync_channel::<Vec<crate::par2::encoder::FileHashes>>(1);
+                std::sync::mpsc::sync_channel::<Vec<pesto_par2::encoder::FileHashes>>(1);
 
             // Step 1: Spawn the MD5 hasher thread. It consumes Par2Work and
             // feeds raw Vec<u8> buffers to the RS encoder thread.
             if compute_hashes {
                 std::thread::spawn(move || {
                     let mut hashes = Vec::new();
-                    let mut current_hasher = crate::par2::encoder::FileHasher::new();
+                    let mut current_hasher = pesto_par2::encoder::FileHasher::new();
                     while let Ok(work) = rx.recv() {
                         match work {
                             Par2Work::Slice {
@@ -92,7 +92,7 @@ impl Par2Worker {
                                 current_hasher.update(&data[..actual_len]);
                                 if is_last_of_file {
                                     hashes.push(current_hasher.finish());
-                                    current_hasher = crate::par2::encoder::FileHasher::new();
+                                    current_hasher = pesto_par2::encoder::FileHasher::new();
                                 }
                                 let _ = rs_tx.send(data);
                             }
@@ -169,9 +169,9 @@ impl Par2Worker {
     fn finish(
         self,
     ) -> (
-        Vec<crate::par2::encoder::RecoverySlice>,
+        Vec<pesto_par2::encoder::RecoverySlice>,
         Vec<SliceChecksum>,
-        Vec<crate::par2::encoder::FileHashes>,
+        Vec<pesto_par2::encoder::FileHashes>,
     ) {
         drop(self.tx); // closing the channel causes rx.recv() to return Err
         self.handle.join().expect("par2 worker thread panicked")

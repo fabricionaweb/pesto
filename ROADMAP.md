@@ -1876,7 +1876,45 @@ Essential for public beta: allow users to provide detailed logs when reporting i
 
 ---
 
-## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
+## Phase 20 — PAR2 Library Separation
+
+Decouple the high-performance PAR2 encoder from the Usenet-specific logic. This
+turns the core of `pesto` into a standalone asset that can be used by other
+projects (like `upapasta` directly) and improves build times.
+
+### 20a — Cargo Workspace setup (Complexity: Low)
+
+- [ ] Convert the repository into a Cargo Workspace.
+- [ ] Move `src/par2` to its own crate directory (e.g., `crates/pesto-par2`).
+- [ ] Update `Cargo.toml` in the root to manage both the binary and the new crate.
+- [ ] Ensure `cargo test` and `cargo build` still work across the workspace.
+
+### 20b — API Decoupling and Cleanup (Complexity: Medium)
+
+- [ ] Remove all Usenet/NNTP/NZB specific terminology from the PAR2 crate.
+- [ ] Redesign the `RecoveryEncoder` API to be generic over any source of bytes
+      (e.g., `std::io::Read` or a custom trait), not tied to the `pesto` reader.
+- [ ] Extract SIMD detection and dispatch logic into the library so it works
+      standalone.
+- [ ] Provide a clean `prelude` or high-level API for third-party consumers.
+
+### 20c — Performance Isolation and Benchmarking (Complexity: Medium)
+
+- [ ] Move internal micro-benchmarks (`bench-internals`) into the library crate.
+- [ ] Ensure that moving the code doesn't introduce performance regressions due
+      to cross-crate optimization boundaries (use `#[inline]` where necessary).
+- [ ] Add library-specific documentation and examples for standalone usage.
+
+### 20d — Independent Publication (Complexity: High)
+
+- [ ] Version the library independently from the `pesto` binary.
+- [ ] Publish `pesto-par2` to crates.io.
+- [ ] Update `pesto` (the binary) to depend on the published crate (or workspace
+      path) instead of local modules.
+
+---
+
+## Phase 32 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
 
