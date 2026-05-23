@@ -140,7 +140,7 @@ pub fn encode_part(
         );
     }
 
-    encode_scalar(&mut body, data, line_len);
+    encode(&mut body, data, line_len);
 
     if multipart {
         body.extend_from_slice(
@@ -362,6 +362,170 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     }
 }
 
+// --- AVX2 path (x86-64 only) ---
+
+/// AVX2-accelerated yEnc encoder. Falls back to SSSE3 or scalar when the
+/// required CPU features are absent (detected at runtime).
+///
+/// Produces identical output to [`encode_scalar`] for all inputs.
+#[cfg(target_arch = "x86_64")]
+pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: we just confirmed the CPU supports AVX2.
+        unsafe { encode_avx2_impl(out, data, line_len) }
+    } else {
+        encode_ssse3(out, data, line_len)
+    }
+}
+
+/// Runtime-dispatched encoder: picks the fastest path available on this CPU.
+///
+/// Priority: AVX2 > SSSE3 > scalar. Use this in production code instead of
+/// calling a specific path directly.
+#[cfg(target_arch = "x86_64")]
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { encode_avx2_impl(out, data, line_len) }
+    } else if is_x86_feature_detected!("ssse3") {
+        unsafe { encode_ssse3_impl(out, data, line_len) }
+    } else {
+        encode_scalar(out, data, line_len)
+    }
+}
+
+/// Runtime-dispatched encoder for non-x86 targets (scalar only).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    encode_scalar(out, data, line_len)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    use std::arch::x86_64::*;
+
+    let line_len = line_len.max(1);
+    if data.is_empty() {
+        return;
+    }
+
+    let last = data.len() - 1;
+    let add42 = _mm256_set1_epi8(42i8);
+    let v_nul = _mm256_setzero_si256();
+    let v_lf = _mm256_set1_epi8(0x0Au8 as i8);
+    let v_cr = _mm256_set1_epi8(0x0Du8 as i8);
+    let v_eq = _mm256_set1_epi8(0x3Du8 as i8);
+
+    let mut i = 0usize;
+    let mut col = 0usize;
+
+    while i < data.len() {
+        // -- Line-start byte: always scalar (dot/space/tab positional escapes) --
+        if col == 0 {
+            let at_line_end = line_len == 1 || i == last;
+            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            i += 1;
+            continue;
+        }
+
+        // -- Middle zone: col in [1, line_len-2] and not the last data byte --
+        let safe = if line_len > 1 {
+            let till_line_end = line_len - 1 - col;
+            let till_data_end = last.saturating_sub(i);
+            till_line_end.min(till_data_end)
+        } else {
+            0
+        };
+
+        // AVX2: 32-byte chunks
+        let mut safe_rem = safe;
+        while safe_rem >= 32 {
+            let chunk = _mm256_loadu_si256(data.as_ptr().add(i) as *const __m256i);
+            let shifted = _mm256_add_epi8(chunk, add42);
+
+            // Build escape mask for the four critical values.
+            let m0 = _mm256_cmpeq_epi8(shifted, v_nul);
+            let m1 = _mm256_cmpeq_epi8(shifted, v_lf);
+            let m2 = _mm256_cmpeq_epi8(shifted, v_cr);
+            let m3 = _mm256_cmpeq_epi8(shifted, v_eq);
+            let any = _mm256_or_si256(_mm256_or_si256(m0, m1), _mm256_or_si256(m2, m3));
+            let needs_escape = _mm256_movemask_epi8(any);
+
+            if needs_escape == 0 {
+                // Fast path: write 32 shifted bytes directly.
+                let old_len = out.len();
+                out.reserve(32);
+                _mm256_storeu_si256(out.as_mut_ptr().add(old_len) as *mut __m256i, shifted);
+                out.set_len(old_len + 32);
+            } else {
+                // Slow path: one or more critical bytes in this chunk.
+                let mut tmp = [0u8; 32];
+                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, shifted);
+                for &e in &tmp {
+                    emit_critical_only(out, e);
+                }
+            }
+
+            i += 32;
+            col += 32;
+            safe_rem -= 32;
+        }
+
+        // SSSE3 remainder: 16-byte chunks from what AVX2 couldn't cover.
+        // Reuse the 128-bit registers rather than calling encode_ssse3_impl to
+        // avoid re-entering the outer boundary logic.
+        let add42_128 = _mm_set1_epi8(42i8);
+        let v_nul_128 = _mm_setzero_si128();
+        let v_lf_128 = _mm_set1_epi8(0x0Au8 as i8);
+        let v_cr_128 = _mm_set1_epi8(0x0Du8 as i8);
+        let v_eq_128 = _mm_set1_epi8(0x3Du8 as i8);
+        while safe_rem >= 16 {
+            let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
+            let shifted = _mm_add_epi8(chunk, add42_128);
+            let m0 = _mm_cmpeq_epi8(shifted, v_nul_128);
+            let m1 = _mm_cmpeq_epi8(shifted, v_lf_128);
+            let m2 = _mm_cmpeq_epi8(shifted, v_cr_128);
+            let m3 = _mm_cmpeq_epi8(shifted, v_eq_128);
+            let any = _mm_or_si128(_mm_or_si128(m0, m1), _mm_or_si128(m2, m3));
+            if _mm_movemask_epi8(any) == 0 {
+                let old_len = out.len();
+                out.reserve(16);
+                _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
+                out.set_len(old_len + 16);
+            } else {
+                let mut tmp = [0u8; 16];
+                _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted);
+                for &e in &tmp {
+                    emit_critical_only(out, e);
+                }
+            }
+            i += 16;
+            col += 16;
+            safe_rem -= 16;
+        }
+
+        // Scalar tail of the safe zone (< 16 bytes, no positional escapes).
+        while safe_rem > 0 {
+            emit_critical_only(out, data[i].wrapping_add(42));
+            i += 1;
+            col += 1;
+            safe_rem -= 1;
+        }
+
+        // -- Line-end byte OR last data byte: scalar --
+        if i < data.len() {
+            let at_line_end = col + 1 == line_len || i == last;
+            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            i += 1;
+        }
+    }
+
+    // Trailing CRLF for a partial line.
+    if col != 0 {
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,7 +547,7 @@ mod tests {
         out
     }
 
-    fn encode(data: &[u8], line_len: usize) -> Vec<u8> {
+    fn encode_s(data: &[u8], line_len: usize) -> Vec<u8> {
         let mut out = Vec::new();
         encode_scalar(&mut out, data, line_len);
         out
@@ -408,31 +572,31 @@ mod tests {
     #[test]
     fn escapes_critical_characters() {
         // 0xD6 + 42 == 0x00 (NUL) -> escaped as '=' + (0x00 + 64).
-        assert_eq!(encode(&[0xD6], 128), vec![b'=', 0x40, b'\r', b'\n']);
+        assert_eq!(encode_s(&[0xD6], 128), vec![b'=', 0x40, b'\r', b'\n']);
         // 0xE3 + 42 == 0x0D (CR) -> escaped.
-        assert_eq!(encode(&[0xE3], 128), vec![b'=', 0x4D, b'\r', b'\n']);
+        assert_eq!(encode_s(&[0xE3], 128), vec![b'=', 0x4D, b'\r', b'\n']);
         // 0x13 + 42 == 0x3D ('=') -> escaped.
-        assert_eq!(encode(&[0x13], 128), vec![b'=', 0x7D, b'\r', b'\n']);
+        assert_eq!(encode_s(&[0x13], 128), vec![b'=', 0x7D, b'\r', b'\n']);
     }
 
     #[test]
     fn escapes_dot_at_line_start() {
         // 0x04 + 42 == 0x2E ('.'); at the start of a line it must be escaped.
-        assert_eq!(encode(&[0x04], 128), vec![b'=', 0x6E, b'\r', b'\n']);
+        assert_eq!(encode_s(&[0x04], 128), vec![b'=', 0x6E, b'\r', b'\n']);
         // Mid-line, the same byte is left untouched.
-        let line = encode(&[0x00, 0x04], 128);
+        let line = encode_s(&[0x00, 0x04], 128);
         assert_eq!(line, vec![0x2A, 0x2E, b'\r', b'\n']);
     }
 
     #[test]
     fn non_critical_byte_is_shifted() {
         // 0x00 + 42 == 0x2A ('*'), not a critical character.
-        assert_eq!(encode(&[0x00], 128), vec![0x2A, b'\r', b'\n']);
+        assert_eq!(encode_s(&[0x00], 128), vec![0x2A, b'\r', b'\n']);
     }
 
     #[test]
     fn wraps_lines_at_line_length() {
-        let encoded = encode(&[0u8; 5], 2);
+        let encoded = encode_s(&[0u8; 5], 2);
         // Three lines: 2 + 2 + 1 bytes, each terminated by CRLF.
         assert_eq!(encoded, b"\x2a\x2a\r\n\x2a\x2a\r\n\x2a\r\n");
     }
@@ -440,7 +604,7 @@ mod tests {
     #[test]
     fn encoding_is_reversible_for_all_byte_values() {
         let data: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
-        assert_eq!(decode(&encode(&data, 128)), data);
+        assert_eq!(decode(&encode_s(&data, 128)), data);
     }
 
     #[test]
@@ -534,7 +698,7 @@ mod tests {
         // A single segment whose data is exactly line_len bytes should produce
         // a single encoded line (no premature wrap, no missing trailing CRLF).
         let data: Vec<u8> = vec![0x00; 128]; // 128 bytes, none critical
-        let encoded = encode(&data, 128);
+        let encoded = encode_s(&data, 128);
         // Exactly 128 encoded bytes + CRLF; no mid-line CRLF.
         let newline_count = encoded.windows(2).filter(|w| w == b"\r\n").count();
         assert_eq!(
@@ -560,7 +724,7 @@ mod tests {
     #[test]
     fn all_critical_bytes_escaped_at_first_position() {
         for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
-            let enc = encode(&[raw], 128);
+            let enc = encode_s(&[raw], 128);
             assert_eq!(enc[0], b'=', "byte {raw:#04x} not escaped at position 0");
         }
     }
@@ -570,7 +734,7 @@ mod tests {
         // Surround with a neutral byte (0x00 encodes to 0x2A, never critical).
         for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
             let data = [0x00, raw, 0x00];
-            let enc = encode(&data, 128);
+            let enc = encode_s(&data, 128);
             // First byte is neutral (0x2A), second must be escape '='.
             assert_eq!(enc[0], 0x2A);
             assert_eq!(enc[1], b'=', "byte {raw:#04x} not escaped in middle");
@@ -581,7 +745,7 @@ mod tests {
     fn all_critical_bytes_escaped_at_last_position() {
         for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
             let data = [0x00, raw];
-            let enc = encode(&data, 128);
+            let enc = encode_s(&data, 128);
             assert_eq!(enc[0], 0x2A);
             assert_eq!(enc[1], b'=', "byte {raw:#04x} not escaped at last position");
         }
@@ -590,7 +754,7 @@ mod tests {
     #[test]
     fn consecutive_critical_bytes_all_escaped() {
         let data = [NUL_IN, LF_IN, CR_IN, EQ_IN];
-        let enc = encode(&data, 128);
+        let enc = encode_s(&data, 128);
         // 4 escaped bytes = 8 encoded bytes + CRLF.
         assert_eq!(enc.len(), 10);
         for i in (0..8).step_by(2) {
@@ -602,20 +766,20 @@ mod tests {
     #[test]
     fn critical_escape_payload_is_value_plus_64() {
         // NUL (0x00): escape payload = 0x00 + 64 = 0x40.
-        assert_eq!(encode(&[NUL_IN], 128)[1], 0x40);
+        assert_eq!(encode_s(&[NUL_IN], 128)[1], 0x40);
         // LF  (0x0A): payload = 0x4A.
-        assert_eq!(encode(&[LF_IN], 128)[1], 0x4A);
+        assert_eq!(encode_s(&[LF_IN], 128)[1], 0x4A);
         // CR  (0x0D): payload = 0x4D.
-        assert_eq!(encode(&[CR_IN], 128)[1], 0x4D);
+        assert_eq!(encode_s(&[CR_IN], 128)[1], 0x4D);
         // '=' (0x3D): payload = 0x7D.
-        assert_eq!(encode(&[EQ_IN], 128)[1], 0x7D);
+        assert_eq!(encode_s(&[EQ_IN], 128)[1], 0x7D);
     }
 
     // --- 26a: positional escapes ---
 
     #[test]
     fn tab_escaped_at_line_start() {
-        let enc = encode(&[TAB_IN], 128);
+        let enc = encode_s(&[TAB_IN], 128);
         assert_eq!(enc[0], b'=', "TAB not escaped at line start");
         assert_eq!(enc[1], 0x09u8.wrapping_add(64));
     }
@@ -624,7 +788,7 @@ mod tests {
     fn tab_not_escaped_mid_line() {
         // 0x00 is a safe neutral byte (encodes to 0x2A).
         let data = [0x00, TAB_IN, 0x00];
-        let enc = encode(&data, 128);
+        let enc = encode_s(&data, 128);
         assert_eq!(enc[1], 0x09, "TAB incorrectly escaped mid-line");
     }
 
@@ -632,7 +796,7 @@ mod tests {
     fn tab_escaped_at_line_end() {
         // line_len=4: positions 0,1,2,3 → position 3 is the last in the line.
         let data = [0x00, 0x00, 0x00, TAB_IN];
-        let enc = encode(&data, 4);
+        let enc = encode_s(&data, 4);
         // First three neutral bytes produce 0x2A each.
         assert_eq!(&enc[..3], &[0x2A, 0x2A, 0x2A]);
         assert_eq!(enc[3], b'=', "TAB not escaped at line end (col=line_len-1)");
@@ -640,21 +804,21 @@ mod tests {
 
     #[test]
     fn space_escaped_at_line_start() {
-        let enc = encode(&[SP_IN], 128);
+        let enc = encode_s(&[SP_IN], 128);
         assert_eq!(enc[0], b'=', "SPACE not escaped at line start");
     }
 
     #[test]
     fn space_not_escaped_mid_line() {
         let data = [0x00, SP_IN, 0x00];
-        let enc = encode(&data, 128);
+        let enc = encode_s(&data, 128);
         assert_eq!(enc[1], 0x20, "SPACE incorrectly escaped mid-line");
     }
 
     #[test]
     fn space_escaped_at_line_end() {
         let data = [0x00, 0x00, 0x00, SP_IN];
-        let enc = encode(&data, 4);
+        let enc = encode_s(&data, 4);
         assert_eq!(&enc[..3], &[0x2A, 0x2A, 0x2A]);
         assert_eq!(enc[3], b'=', "SPACE not escaped at line end");
     }
@@ -663,7 +827,7 @@ mod tests {
     fn dot_escaped_at_start_of_second_line() {
         // line_len=2: first line = [0x00, 0x00], second line starts with DOT_IN.
         let data = [0x00, 0x00, DOT_IN];
-        let enc = encode(&data, 2);
+        let enc = encode_s(&data, 2);
         // First line: 0x2A 0x2A \r\n
         assert_eq!(&enc[..4], b"\x2a\x2a\r\n");
         // Second line must begin with '=' (dot at line start, NNTP dot-stuffing).
@@ -674,7 +838,7 @@ mod tests {
     fn dot_not_escaped_mid_line_or_line_end() {
         // DOT_IN mid-line and at end of line — neither position requires escape.
         let data = [0x00, DOT_IN, DOT_IN];
-        let enc = encode(&data, 128);
+        let enc = encode_s(&data, 128);
         // Position 1 and 2 are mid-line and last — no escape needed.
         assert_eq!(enc[1], 0x2E, "dot incorrectly escaped mid-line");
         assert_eq!(enc[2], 0x2E, "dot incorrectly escaped at last position");
@@ -686,7 +850,7 @@ mod tests {
     fn line_wrap_inserts_crlf_at_boundary() {
         // line_len=3: every 3 input bytes produce one CRLF.
         let data = [0x00u8; 6];
-        let enc = encode(&data, 3);
+        let enc = encode_s(&data, 3);
         assert_eq!(&enc[3..5], b"\r\n", "CRLF missing after first full line");
         assert_eq!(&enc[8..10], b"\r\n", "CRLF missing after second full line");
         assert_eq!(enc.len(), 10); // 3+CRLF + 3+CRLF
@@ -695,7 +859,7 @@ mod tests {
     #[test]
     fn trailing_crlf_added_for_partial_line() {
         let data = [0x00u8; 5];
-        let enc = encode(&data, 3);
+        let enc = encode_s(&data, 3);
         // Lines: 3 bytes + CRLF, then 2 bytes + CRLF.
         assert_eq!(enc.len(), 9);
         assert_eq!(&enc[7..], b"\r\n");
@@ -706,7 +870,7 @@ mod tests {
     #[test]
     fn full_256_byte_round_trip() {
         let data: Vec<u8> = (0u8..=255).collect();
-        assert_eq!(decode(&encode(&data, 128)), data);
+        assert_eq!(decode(&encode_s(&data, 128)), data);
     }
 
     // --- 26b: SSSE3 path produces identical output to scalar ---
@@ -723,7 +887,7 @@ mod tests {
         ($data:expr, $line_len:expr) => {{
             #[cfg(target_arch = "x86_64")]
             {
-                let scalar = encode($data, $line_len);
+                let scalar = encode_s($data, $line_len);
                 let simd = encode_ssse3_vec($data, $line_len);
                 assert_eq!(
                     simd, scalar,
@@ -807,5 +971,112 @@ mod tests {
             encode_ssse3(&mut encoded, &data, 128);
             assert_eq!(decode(&encoded), data);
         }
+    }
+
+    // --- 26c: AVX2 path produces identical output to scalar ---
+
+    #[cfg(target_arch = "x86_64")]
+    fn encode_avx2_vec(data: &[u8], line_len: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_avx2(&mut out, data, line_len);
+        out
+    }
+
+    macro_rules! assert_avx2_eq {
+        ($data:expr, $line_len:expr) => {{
+            #[cfg(target_arch = "x86_64")]
+            {
+                let scalar = encode_s($data, $line_len);
+                let simd = encode_avx2_vec($data, $line_len);
+                assert_eq!(
+                    simd, scalar,
+                    "AVX2 diverges from scalar (line_len={})",
+                    $line_len
+                );
+            }
+        }};
+    }
+
+    #[test]
+    fn avx2_matches_scalar_all_256_byte_values() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        assert_avx2_eq!(&data, 128);
+    }
+
+    #[test]
+    fn avx2_matches_scalar_all_critical_bytes() {
+        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+            .iter()
+            .cycle()
+            .copied()
+            .take(512)
+            .collect();
+        assert_avx2_eq!(&data, 128);
+    }
+
+    #[test]
+    fn avx2_matches_scalar_positional_bytes_at_boundaries() {
+        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+            .iter()
+            .cycle()
+            .copied()
+            .take(256)
+            .collect();
+        assert_avx2_eq!(&data, 4);
+    }
+
+    #[test]
+    fn avx2_matches_scalar_large_random_like_payload() {
+        let data: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+            .take(750 * 1024)
+            .collect();
+        assert_avx2_eq!(&data, 128);
+    }
+
+    #[test]
+    fn avx2_matches_scalar_empty() {
+        assert_avx2_eq!(&[], 128);
+    }
+
+    #[test]
+    fn avx2_matches_scalar_single_byte() {
+        for b in 0u8..=255 {
+            let data = [b];
+            assert_avx2_eq!(&data, 128);
+        }
+    }
+
+    #[test]
+    fn avx2_matches_scalar_short_line_len() {
+        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+        for ll in [1, 2, 3, 4, 7, 16, 17, 32, 33] {
+            assert_avx2_eq!(&data, ll);
+        }
+    }
+
+    #[test]
+    fn avx2_round_trip() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
+            let mut encoded = Vec::new();
+            encode_avx2(&mut encoded, &data, 128);
+            assert_eq!(decode(&encoded), data);
+        }
+    }
+
+    // --- dispatcher always matches scalar ---
+
+    #[test]
+    fn dispatcher_matches_scalar_large_payload() {
+        let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        super::encode(&mut a, &data, 128);
+        encode_scalar(&mut b, &data, 128);
+        assert_eq!(a, b);
     }
 }
