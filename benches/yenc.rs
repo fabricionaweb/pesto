@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use pesto::yenc::{encode_scalar, encode_ssse3};
+use pesto::yenc::{encode, encode_avx2, encode_scalar, encode_ssse3};
 
 fn bench(label: &str, n: usize, f: impl Fn(&[u8], &mut Vec<u8>)) {
     let data: Vec<u8> = (0u8..=255).cycle().take(n).collect();
@@ -23,10 +23,18 @@ fn main() {
     let sizes = [512usize, 4 * 1024, 128 * 1024, 750 * 1024];
 
     for n in sizes {
-        bench("encode_scalar", n, |d, o| encode_scalar(o, d, 128));
+        bench("encode_scalar ", n, |d, o| encode_scalar(o, d, 128));
     }
     println!();
     for n in sizes {
-        bench("encode_ssse3 ", n, |d, o| encode_ssse3(o, d, 128));
+        bench("encode_ssse3  ", n, |d, o| encode_ssse3(o, d, 128));
+    }
+    println!();
+    for n in sizes {
+        bench("encode_avx2   ", n, |d, o| encode_avx2(o, d, 128));
+    }
+    println!();
+    for n in sizes {
+        bench("encode (disp) ", n, |d, o| encode(o, d, 128));
     }
 }
