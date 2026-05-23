@@ -172,6 +172,41 @@ pub fn encode_part(
     }
 }
 
+/// Compute the exact number of bytes that encoding `data` with `line_len` will
+/// produce, including escape sequences and `\r\n` line terminators.
+///
+/// Callers can use this to pre-reserve output buffer capacity before encoding,
+/// eliminating all reallocation and per-chunk `reserve` calls inside the hot loop.
+pub fn encoded_size(data: &[u8], line_len: usize) -> usize {
+    let line_len = line_len.max(1);
+    if data.is_empty() {
+        return 0;
+    }
+    let last = data.len() - 1;
+    let mut escapes = 0usize;
+    let mut col = 0usize;
+
+    for (i, &b) in data.iter().enumerate() {
+        let e = b.wrapping_add(42);
+        let at_line_start = col == 0;
+        let at_line_end = col + 1 == line_len || i == last;
+        let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+        let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
+            || (e == 0x2E && at_line_start);
+        if critical || positional {
+            escapes += 1;
+        }
+        col += 1;
+        if col == line_len {
+            col = 0;
+        }
+    }
+
+    // One CRLF per complete line, plus one trailing CRLF for a partial final line.
+    let lines = data.len().div_ceil(line_len);
+    data.len() + escapes + lines * 2
+}
+
 /// Core yEnc encoder: append the encoded form of `data` to `out`, wrapping
 /// every `line_len` source bytes.
 ///
@@ -182,6 +217,8 @@ pub fn encode_part(
 /// start of a line (to keep clear of NNTP dot-stuffing).
 pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     let line_len = line_len.max(1);
+    // Upper bound: every byte could escape (×2) + one CRLF per line.
+    out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
     let last = data.len().saturating_sub(1);
     let mut col = 0usize;
 
@@ -274,6 +311,9 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         return;
     }
 
+    // Upper bound reserve: eliminates all per-chunk reserve() calls.
+    out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
+
     let last = data.len() - 1;
     let add42 = _mm_set1_epi8(42i8);
     let v_nul = _mm_setzero_si128();
@@ -320,9 +360,8 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let needs_escape = _mm_movemask_epi8(any);
 
             if needs_escape == 0 {
-                // Fast path: write 16 shifted bytes directly.
+                // Fast path: capacity guaranteed by pre-reserve; write directly.
                 let old_len = out.len();
-                out.reserve(16);
                 _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
                 out.set_len(old_len + 16);
             } else {
@@ -409,6 +448,9 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         return;
     }
 
+    // Upper bound reserve: eliminates all per-chunk reserve() calls.
+    out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
+
     let last = data.len() - 1;
     let add42 = _mm256_set1_epi8(42i8);
     let v_nul = _mm256_setzero_si256();
@@ -452,9 +494,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let needs_escape = _mm256_movemask_epi8(any);
 
             if needs_escape == 0 {
-                // Fast path: write 32 shifted bytes directly.
+                // Fast path: capacity guaranteed by pre-reserve; write directly.
                 let old_len = out.len();
-                out.reserve(32);
                 _mm256_storeu_si256(out.as_mut_ptr().add(old_len) as *mut __m256i, shifted);
                 out.set_len(old_len + 32);
             } else {
@@ -489,7 +530,6 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let any = _mm_or_si128(_mm_or_si128(m0, m1), _mm_or_si128(m2, m3));
             if _mm_movemask_epi8(any) == 0 {
                 let old_len = out.len();
-                out.reserve(16);
                 _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
                 out.set_len(old_len + 16);
             } else {
@@ -1078,5 +1118,73 @@ mod tests {
         super::encode(&mut a, &data, 128);
         encode_scalar(&mut b, &data, 128);
         assert_eq!(a, b);
+    }
+
+    // --- 26d: encoded_size matches actual output length ---
+
+    fn check_encoded_size(data: &[u8], line_len: usize) {
+        let predicted = encoded_size(data, line_len);
+        let actual = encode_s(data, line_len).len();
+        assert_eq!(
+            predicted,
+            actual,
+            "encoded_size mismatch: predicted={predicted} actual={actual} \
+             (data.len()={}, line_len={line_len})",
+            data.len()
+        );
+    }
+
+    #[test]
+    fn encoded_size_matches_empty() {
+        assert_eq!(encoded_size(&[], 128), 0);
+    }
+
+    #[test]
+    fn encoded_size_matches_all_256_byte_values() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        check_encoded_size(&data, 128);
+    }
+
+    #[test]
+    fn encoded_size_matches_all_critical_bytes() {
+        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+            .iter()
+            .cycle()
+            .copied()
+            .take(512)
+            .collect();
+        check_encoded_size(&data, 128);
+    }
+
+    #[test]
+    fn encoded_size_matches_positional_bytes_at_boundaries() {
+        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+            .iter()
+            .cycle()
+            .copied()
+            .take(256)
+            .collect();
+        for ll in [1, 2, 3, 4, 7, 16, 17, 128] {
+            check_encoded_size(&data, ll);
+        }
+    }
+
+    #[test]
+    fn encoded_size_matches_all_single_bytes() {
+        for b in 0u8..=255 {
+            check_encoded_size(&[b], 128);
+            check_encoded_size(&[b], 1);
+        }
+    }
+
+    #[test]
+    fn encoded_size_matches_large_payload() {
+        let data: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+            .take(750 * 1024)
+            .collect();
+        check_encoded_size(&data, 128);
     }
 }
