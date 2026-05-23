@@ -3434,7 +3434,7 @@ impl RecoveryEncoder {
         });
     }
 
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    #[allow(dead_code)]
     fn flush_scalar(&mut self) {
         // Altmap and Shuffle2x paths are x86_64-only; on other arches drain without processing.
         if !matches!(self.buffers, RecoveryBufferSet::Normal(_)) {
@@ -3483,6 +3483,7 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
+    #[allow(dead_code)]
     pub(super) fn flush_scalar_work(
         buffers: &mut [Vec<u16>],
         queued: &[Vec<u8>],
