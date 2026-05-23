@@ -3199,6 +3199,14 @@ impl RecoveryEncoder {
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     unsafe fn flush_neon_clmul(&mut self) {
+        // Altmap and Shuffle2x paths are x86_64-only; on AArch64 drain without processing.
+        if !matches!(self.buffers, RecoveryBufferSet::Normal(_)) {
+            let queued = std::mem::take(&mut self.queued_slices);
+            self.next_index += queued.len();
+            self.recycle_queue(queued);
+            return;
+        }
+
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
@@ -3428,6 +3436,14 @@ impl RecoveryEncoder {
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn flush_scalar(&mut self) {
+        // Altmap and Shuffle2x paths are x86_64-only; on other arches drain without processing.
+        if !matches!(self.buffers, RecoveryBufferSet::Normal(_)) {
+            let queued = std::mem::take(&mut self.queued_slices);
+            self.next_index += queued.len();
+            self.recycle_queue(queued);
+            return;
+        }
+
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
@@ -3917,10 +3933,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn new_altmap_produces_correct_recovery_data() {
         // Verify that new_altmap() produces byte-identical recovery data to new().
-        // Only meaningful on AVX2 hardware; skip otherwise.
-        #[cfg(target_arch = "x86_64")]
+        // Only meaningful on x86_64 with AVX2 hardware; skip otherwise.
         if !std::is_x86_feature_detected!("avx2") {
             return;
         }
@@ -3984,10 +4000,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn new_shuffle2x_produces_correct_recovery_data() {
         // Verify that new_shuffle2x() produces byte-identical recovery data to new().
-        // Only meaningful on AVX2 hardware; skip otherwise.
-        #[cfg(target_arch = "x86_64")]
+        // Only meaningful on x86_64 with AVX2 hardware; skip otherwise.
         if !std::is_x86_feature_detected!("avx2") {
             return;
         }
@@ -4034,9 +4050,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn new_shuffle2x_exponent_start_offset() {
         // Verify that exponent_start != 0 works correctly with Shuffle2x.
-        #[cfg(target_arch = "x86_64")]
+        // Only meaningful on x86_64 with AVX2 hardware; skip otherwise.
         if !std::is_x86_feature_detected!("avx2") {
             return;
         }
