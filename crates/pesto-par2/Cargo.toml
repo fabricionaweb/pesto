@@ -1,0 +1,18 @@
+[package]
+name = "pesto-par2"
+version = "0.2.21"
+edition = "2021"
+rust-version = "1.89"
+description = "High-performance PAR2 (Reed-Solomon) encoder for pesto"
+license = "MIT"
+
+[dependencies]
+rayon = "1.12.0"
+md-5 = { version = "0.10", features = ["asm"] }
+crc32fast = "1.4"
+tracing = "0.1"
+anyhow = "1"
+
+[features]
+bench-internals = []
+par2-avx2-gfni-unsafe = []
