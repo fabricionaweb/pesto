@@ -2,8 +2,6 @@ use crate::worker::Par2Worker;
 use crate::SimdPath;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 
 /// High-level PAR2 creation parameters.
 #[derive(Debug, Clone)]
@@ -39,7 +37,7 @@ pub struct InputFile {
     pub size: u64,
 }
 
-/// Returns the smallest slice size (multiple of 4) that satisfies PAR2 limits.
+/// Returns the smallest slice size (multiple of 64) that satisfies PAR2 limits.
 pub fn calculate_geometry(
     files: &[InputFile],
     options: &CreateOptions,
@@ -47,17 +45,17 @@ pub fn calculate_geometry(
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
 
     let (slice_size, total_slices) = if let Some(s) = options.slice_size {
-        let s = (s / 4 * 4).max(4);
+        let s = (s / 64 * 64).max(64);
         let n: usize = files.iter().map(|f| (f.size as usize).div_ceil(s)).sum();
         (s, n)
     } else if let Some(count) = options.slice_count {
-        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 4 * 4).max(4);
+        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
         let n: usize = files.iter().map(|f| (f.size as usize).div_ceil(s)).sum();
         (s, n)
     } else {
         // Pesto's heuristic: target ~1000 slices, but stay within 32k limits.
         let target = 1000usize;
-        let mut s = ((total_bytes as usize).div_ceil(target).max(4) / 4 * 4).max(4);
+        let mut s = ((total_bytes as usize).div_ceil(target).max(64) / 64 * 64).max(64);
         let mut n: usize = files.iter().map(|f| (f.size as usize).div_ceil(s)).sum();
 
         // If we exceed 32768 slices, increase slice size until we fit.
@@ -84,71 +82,64 @@ pub fn calculate_geometry(
     Ok((slice_size, total_slices, recovery_count))
 }
 
-/// Ingests files into a PAR2 worker, computing MD5 hashes in parallel if requested.
+/// Ingests files into a PAR2 worker.
 pub async fn ingest_files(
     files: &[InputFile],
     worker: &Par2Worker,
     slice_size: usize,
-    compute_hashes: bool,
-) -> Result<Option<Vec<crate::encoder::FileHashes>>> {
-    let mut all_hashes = if compute_hashes {
-        Some(Vec::with_capacity(files.len()))
-    } else {
-        None
-    };
-
+) -> Result<()> {
     for file_info in files {
-        let mut file = File::open(&file_info.path)
-            .await
-            .with_context(|| format!("opening `{}`", file_info.path.display()))?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let path = file_info.path.clone();
 
-        let mut current_hasher = if compute_hashes {
-            Some(crate::encoder::FileHasher::new())
-        } else {
-            None
-        };
-
-        let mut slice_buf = worker.take_buffer(slice_size);
-        slice_buf.clear();
-
-        let mut remaining = file_info.size as usize;
-        while remaining > 0 {
-            let space = slice_size - slice_buf.len();
-            let to_read = space.min(remaining);
-
-            let base = slice_buf.len();
-            slice_buf.reserve(to_read);
-            let dst = unsafe {
-                std::slice::from_raw_parts_mut(slice_buf.as_mut_ptr().add(base), to_read)
-            };
-            file.read_exact(dst)
-                .await
-                .with_context(|| format!("reading `{}`", file_info.path.display()))?;
-
-            if let Some(h) = &mut current_hasher {
-                h.update(dst);
+        // Double-buffered reader task: fetch data while we process previous chunks.
+        let reader_handle = tokio::task::spawn_blocking(move || {
+            use std::fs::File;
+            use std::io::Read;
+            let mut file = File::open(&path)?;
+            loop {
+                let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MiB chunks
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                buf.truncate(n);
+                if tx.blocking_send(buf).is_err() {
+                    break;
+                }
             }
+            Ok::<_, anyhow::Error>(())
+        });
 
-            unsafe { slice_buf.set_len(base + to_read) };
-            remaining -= to_read;
+        let mut slice_accum = worker.take_buffer(slice_size);
+        slice_accum.clear();
 
-            if slice_buf.len() >= slice_size {
-                let next = worker.take_buffer(slice_size);
-                let padded = std::mem::replace(&mut slice_buf, next);
-                tokio::task::block_in_place(|| worker.send_slice(padded, slice_size, remaining == 0));
+        while let Some(chunk) = rx.recv().await {
+            let mut chunk_pos = 0;
+            while chunk_pos < chunk.len() {
+                let space = slice_size - slice_accum.len();
+                let take = space.min(chunk.len() - chunk_pos);
+                slice_accum.extend_from_slice(&chunk[chunk_pos..chunk_pos + take]);
+                chunk_pos += take;
+
+                if slice_accum.len() >= slice_size {
+                    let next = worker.take_buffer(slice_size);
+                    let padded = std::mem::replace(&mut slice_accum, next);
+                    tokio::task::block_in_place(|| {
+                        worker.send_slice(padded, slice_size, false);
+                    });
+                }
             }
         }
 
-        if let (Some(hashes), Some(h)) = (&mut all_hashes, current_hasher) {
-            hashes.push(h.finish());
-        }
+        reader_handle.await??;
 
-        if !slice_buf.is_empty() {
-            let actual_len = slice_buf.len();
-            slice_buf.resize(slice_size, 0);
-            tokio::task::block_in_place(|| worker.send_slice(slice_buf, actual_len, true));
+        if !slice_accum.is_empty() {
+            let actual_len = slice_accum.len();
+            slice_accum.resize(slice_size, 0);
+            tokio::task::block_in_place(|| worker.send_slice(slice_accum, actual_len, true));
         }
     }
 
-    Ok(all_hashes)
+    Ok(())
 }

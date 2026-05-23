@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
         .build_global();
 
     let mut all_checksums: Vec<Vec<packet::SliceChecksum>> = vec![Vec::new(); input_files.len()];
+    let mut all_hashes = Vec::new();
 
     // In parmesan, we only do one pass if possible.
     let slices_per_pass = (options.memory_limit / slice_size).max(1);
@@ -129,7 +130,7 @@ async fn main() -> Result<()> {
         
         println!("\nPass {} (recovery blocks {}-{}):", pass_idx + 1, start_exponent, start_exponent + count - 1);
 
-        let mut enc = RecoveryEncoder::new(slice_size, total_slices, start_exponent as u32, count);
+        let mut enc = RecoveryEncoder::new_smart(slice_size, total_slices, start_exponent as u32, count);
         if pass_idx == 0 {
             enc = enc.with_checksums();
         }
@@ -138,13 +139,13 @@ async fn main() -> Result<()> {
 
         let worker = Par2Worker::spawn(enc, pass_idx == 0);
         
-        let hashes_opt = ingest_files(&input_files, &worker, slice_size, pass_idx == 0).await?;
+        ingest_files(&input_files, &worker, slice_size).await?;
         
-        let (recovery_slices, slice_checksums, _) = tokio::task::block_in_place(|| worker.finish());
+        let (recovery_slices, slice_checksums, hashes) = tokio::task::block_in_place(|| worker.finish());
 
         if pass_idx == 0 {
             // Store hashes and checksums
-            all_hashes = hashes_opt.unwrap();
+            all_hashes = hashes;
             let mut cs_iter = slice_checksums.into_iter();
             for (idx, f) in input_files.iter().enumerate() {
                 let n = (f.size as usize).div_ceil(slice_size);

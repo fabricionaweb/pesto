@@ -219,6 +219,30 @@ pub enum BenchPath {
 }
 
 impl RecoveryEncoder {
+    /// Create an encoder with the best possible performance layout for the
+    /// current CPU.
+    ///
+    /// Auto-selects between Normal, Shuffle2x (AVX2), and Altmap layouts based
+    /// on detected SIMD features and `slice_size` alignment.
+    pub fn new_smart(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2")
+            && !std::is_x86_feature_detected!("gfni")
+            && slice_size.is_multiple_of(32)
+        {
+            // On AVX2 hardware without GFNI, Shuffle2x is the fastest known layout.
+            return Self::new_shuffle2x(slice_size, total_input_slices, exponent_start, recovery_count);
+        }
+
+        // Default fallback.
+        Self::new(slice_size, total_input_slices, exponent_start, recovery_count)
+    }
+
     /// Create an encoder for `total_input_slices` input slices of `slice_size`
     /// bytes each, producing `recovery_count` recovery blocks (exponents
     /// `exponent_start..exponent_start + recovery_count`).
