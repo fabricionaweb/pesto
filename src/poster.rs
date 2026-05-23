@@ -73,7 +73,8 @@ impl Par2Worker {
 
         let handle = std::thread::spawn(move || {
             let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
-            let (hash_tx, hash_rx) = std::sync::mpsc::sync_channel::<Vec<crate::par2::encoder::FileHashes>>(1);
+            let (hash_tx, hash_rx) =
+                std::sync::mpsc::sync_channel::<Vec<crate::par2::encoder::FileHashes>>(1);
 
             // Step 1: Spawn the MD5 hasher thread. It consumes Par2Work and
             // feeds raw Vec<u8> buffers to the RS encoder thread.
@@ -633,12 +634,12 @@ fn detect_par2_simd() -> &'static str {
 }
 
 /// Number of performance-class cores. On hybrid CPUs (Intel 12th gen and later)
-/// the E-cores execute SIMD at lower throughput and stretch wall-clock when a
-/// rayon partition is scheduled there; restricting the pool to P-cores measured
-/// +2.4% on 5G PAR2 encoding. Detects hybrid layout via Linux topology:
-/// P-cores expose two `thread_siblings_list` entries (HT pair), E-cores stand
-/// alone. When the layout is mixed, return the P-core count (one per SMT pair);
-/// otherwise fall back to [`physical_core_count`].
+/// Detects hybrid layout via Linux topology: P-cores expose two
+/// `thread_siblings_list` entries (HT pair), E-cores stand alone.
+/// On hybrid CPUs (P + E mix) return all physical cores (paired leaders + solo),
+/// one rayon thread per physical core. On non-hybrid CPUs fall back to
+/// [`physical_core_count`]. Hyperthreads are always excluded — they contend for
+/// the same execution ports and add noise on pure SIMD/ALU workloads.
 fn performance_core_count() -> usize {
     use std::collections::HashSet;
 
@@ -677,7 +678,8 @@ fn performance_core_count() -> usize {
     }
 
     if !paired_leaders.is_empty() && !solo.is_empty() {
-        paired_leaders.len()
+        // Hybrid CPU: include both P-cores and E-cores (all physical, no HT).
+        paired_leaders.len() + solo.len()
     } else {
         physical_core_count()
     }
