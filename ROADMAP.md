@@ -168,6 +168,54 @@ level's tests as a golden reference before any SIMD code is merged.
 
 ---
 
+## Phase 27 — yEnc Encoder: AVX2 Correctness & line_len Scaling
+
+Target: exceed nyuu's documented yEnc throughput (~1.2 GB/s AVX2 at
+`line_len=128`) and reach 2–3 GB/s at `line_len=256`. All changes must keep
+the full Phase 26 golden-reference test suite green.
+
+### 27a — Fix AVX2 256→128-bit register mixing *(low complexity)*
+
+The current `encode_avx2_impl` falls back to 128-bit SSSE3 instructions
+(`_mm_cmpeq_epi8`, `_mm_storeu_si128`) for the <32-byte safe-zone remainder
+within the same function. CPUs detect this 256→128 transition and insert
+implicit VZEROUPPER-equivalent stalls, which is why AVX2 benchmarks 12%
+*slower* than SSSE3 for `line_len=128`.
+
+- [ ] Remove the inline 128-bit block from `encode_avx2_impl`; use scalar
+  directly for the safe-zone tail after the 32-byte chunks.
+- [ ] Verify AVX2 now outperforms SSSE3 at `line_len=128`.
+- [ ] Re-run full Phase 26 test suite.
+
+### 27b — Dispatcher: line_len-aware path selection *(low complexity)*
+
+- [ ] In `pub fn encode()`, prefer SSSE3 when `line_len < 48` (safe zone
+  too narrow to fit even one AVX2 chunk) and AVX2 otherwise.
+- [ ] Add a test asserting the selected path for representative `line_len`
+  values (e.g. 1, 32, 48, 64, 128, 256).
+
+### 27c — Benchmark and validate at line_len=256 *(low complexity)*
+
+`line_len=256` gives a safe zone of 254 bytes: 7 AVX2 chunks (224 bytes) vs
+3 today. This is where AVX2 earns its width.
+
+- [ ] Add `line_len=256` rows to `benches/yenc.rs` for all four paths.
+- [ ] Add nyuu's documented yEnc throughput (~1.2 GB/s, `line_len=128`) as a
+  printed reference line so every benchmark run shows the target to beat.
+- [ ] Expected outcome: AVX2 at `line_len=256` ≥ 2 GB/s, exceeding nyuu.
+
+### 27d — DEFAULT_LINE_LENGTH: evaluate raising to 256 *(medium complexity)*
+
+`line_len=128` is historical (yEnc draft spec, 2001). Many modern servers
+accept 256. nyuu itself defaults to 128 but supports 256.
+
+- [ ] Survey what Usenet indexers and servers actually accept today.
+- [ ] If compatible: raise `DEFAULT_LINE_LENGTH` to 256 and update config
+  documentation. Keep 128 available via `--line-length` flag.
+- [ ] Re-run integration tests and `encode_part` golden-reference tests.
+
+---
+
 ## Phase 32 — Future Ideas (Unscheduled)
 
 Concepts to evaluate later. Not committed to any timeline.
