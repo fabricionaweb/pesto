@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use parmesan_core::ops::{calculate_geometry, ingest_files, CreateOptions, InputFile};
-use parmesan_core::worker::Par2Worker;
-use parmesan_core::{encoder::RecoveryEncoder, layout, packet, SimdPath};
+use parmesan::ops::{calculate_geometry, ingest_files, CreateOptions, InputFile};
+use parmesan::worker::Par2Worker;
+use parmesan::{encoder::RecoveryEncoder, layout, packet, SimdPath};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use walkdir::WalkDir;
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
     let rayon_threads = if options.threads > 0 {
         options.threads
     } else {
-        parmesan_core::performance_core_count()
+        parmesan::performance_core_count()
     };
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(rayon_threads)
