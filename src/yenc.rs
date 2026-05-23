@@ -140,7 +140,7 @@ pub fn encode_part(
         );
     }
 
-    encode_into(&mut body, data, line_len);
+    encode_scalar(&mut body, data, line_len);
 
     if multipart {
         body.extend_from_slice(
@@ -180,7 +180,7 @@ pub fn encode_part(
 /// shifted by a further 64. TAB and space are escaped only at the start or end
 /// of a line (where transports may strip them), and `.` is escaped at the
 /// start of a line (to keep clear of NNTP dot-stuffing).
-fn encode_into(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     let line_len = line_len.max(1);
     let last = data.len().saturating_sub(1);
     let mut col = 0usize;
@@ -236,7 +236,7 @@ mod tests {
 
     fn encode(data: &[u8], line_len: usize) -> Vec<u8> {
         let mut out = Vec::new();
-        encode_into(&mut out, data, line_len);
+        encode_scalar(&mut out, data, line_len);
         out
     }
 
@@ -394,5 +394,169 @@ mod tests {
         );
         // Round-trip.
         assert_eq!(decode(&encoded), data);
+    }
+
+    // --- 26a: comprehensive coverage of all four critical bytes ---
+
+    // Input bytes whose encoded value (b+42 mod 256) hits each critical value.
+    const NUL_IN: u8 = 0xD6; // (0xD6+42)%256=0x00 NUL
+    const LF_IN: u8 = 0xE0; // (0xE0+42)%256=0x0A LF
+    const CR_IN: u8 = 0xE3; // (0xE3+42)%256=0x0D CR
+    const EQ_IN: u8 = 0x13; // (0x13+42)%256=0x3D '='
+                            // Input bytes whose encoded value hits positional specials.
+    const TAB_IN: u8 = 0xDF; // (0xDF+42)%256=0x09 TAB
+    const SP_IN: u8 = 0xF6; // (0xF6+42)%256=0x20 SPACE
+    const DOT_IN: u8 = 0x04; // (0x04+42)%256=0x2E '.'
+
+    #[test]
+    fn all_critical_bytes_escaped_at_first_position() {
+        for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
+            let enc = encode(&[raw], 128);
+            assert_eq!(enc[0], b'=', "byte {raw:#04x} not escaped at position 0");
+        }
+    }
+
+    #[test]
+    fn all_critical_bytes_escaped_in_middle() {
+        // Surround with a neutral byte (0x00 encodes to 0x2A, never critical).
+        for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
+            let data = [0x00, raw, 0x00];
+            let enc = encode(&data, 128);
+            // First byte is neutral (0x2A), second must be escape '='.
+            assert_eq!(enc[0], 0x2A);
+            assert_eq!(enc[1], b'=', "byte {raw:#04x} not escaped in middle");
+        }
+    }
+
+    #[test]
+    fn all_critical_bytes_escaped_at_last_position() {
+        for raw in [NUL_IN, LF_IN, CR_IN, EQ_IN] {
+            let data = [0x00, raw];
+            let enc = encode(&data, 128);
+            assert_eq!(enc[0], 0x2A);
+            assert_eq!(enc[1], b'=', "byte {raw:#04x} not escaped at last position");
+        }
+    }
+
+    #[test]
+    fn consecutive_critical_bytes_all_escaped() {
+        let data = [NUL_IN, LF_IN, CR_IN, EQ_IN];
+        let enc = encode(&data, 128);
+        // 4 escaped bytes = 8 encoded bytes + CRLF.
+        assert_eq!(enc.len(), 10);
+        for i in (0..8).step_by(2) {
+            assert_eq!(enc[i], b'=', "escape marker missing at index {i}");
+        }
+        assert_eq!(&enc[8..], b"\r\n");
+    }
+
+    #[test]
+    fn critical_escape_payload_is_value_plus_64() {
+        // NUL (0x00): escape payload = 0x00 + 64 = 0x40.
+        assert_eq!(encode(&[NUL_IN], 128)[1], 0x40);
+        // LF  (0x0A): payload = 0x4A.
+        assert_eq!(encode(&[LF_IN], 128)[1], 0x4A);
+        // CR  (0x0D): payload = 0x4D.
+        assert_eq!(encode(&[CR_IN], 128)[1], 0x4D);
+        // '=' (0x3D): payload = 0x7D.
+        assert_eq!(encode(&[EQ_IN], 128)[1], 0x7D);
+    }
+
+    // --- 26a: positional escapes ---
+
+    #[test]
+    fn tab_escaped_at_line_start() {
+        let enc = encode(&[TAB_IN], 128);
+        assert_eq!(enc[0], b'=', "TAB not escaped at line start");
+        assert_eq!(enc[1], 0x09u8.wrapping_add(64));
+    }
+
+    #[test]
+    fn tab_not_escaped_mid_line() {
+        // 0x00 is a safe neutral byte (encodes to 0x2A).
+        let data = [0x00, TAB_IN, 0x00];
+        let enc = encode(&data, 128);
+        assert_eq!(enc[1], 0x09, "TAB incorrectly escaped mid-line");
+    }
+
+    #[test]
+    fn tab_escaped_at_line_end() {
+        // line_len=4: positions 0,1,2,3 → position 3 is the last in the line.
+        let data = [0x00, 0x00, 0x00, TAB_IN];
+        let enc = encode(&data, 4);
+        // First three neutral bytes produce 0x2A each.
+        assert_eq!(&enc[..3], &[0x2A, 0x2A, 0x2A]);
+        assert_eq!(enc[3], b'=', "TAB not escaped at line end (col=line_len-1)");
+    }
+
+    #[test]
+    fn space_escaped_at_line_start() {
+        let enc = encode(&[SP_IN], 128);
+        assert_eq!(enc[0], b'=', "SPACE not escaped at line start");
+    }
+
+    #[test]
+    fn space_not_escaped_mid_line() {
+        let data = [0x00, SP_IN, 0x00];
+        let enc = encode(&data, 128);
+        assert_eq!(enc[1], 0x20, "SPACE incorrectly escaped mid-line");
+    }
+
+    #[test]
+    fn space_escaped_at_line_end() {
+        let data = [0x00, 0x00, 0x00, SP_IN];
+        let enc = encode(&data, 4);
+        assert_eq!(&enc[..3], &[0x2A, 0x2A, 0x2A]);
+        assert_eq!(enc[3], b'=', "SPACE not escaped at line end");
+    }
+
+    #[test]
+    fn dot_escaped_at_start_of_second_line() {
+        // line_len=2: first line = [0x00, 0x00], second line starts with DOT_IN.
+        let data = [0x00, 0x00, DOT_IN];
+        let enc = encode(&data, 2);
+        // First line: 0x2A 0x2A \r\n
+        assert_eq!(&enc[..4], b"\x2a\x2a\r\n");
+        // Second line must begin with '=' (dot at line start, NNTP dot-stuffing).
+        assert_eq!(enc[4], b'=', "dot not escaped at start of second line");
+    }
+
+    #[test]
+    fn dot_not_escaped_mid_line_or_line_end() {
+        // DOT_IN mid-line and at end of line — neither position requires escape.
+        let data = [0x00, DOT_IN, DOT_IN];
+        let enc = encode(&data, 128);
+        // Position 1 and 2 are mid-line and last — no escape needed.
+        assert_eq!(enc[1], 0x2E, "dot incorrectly escaped mid-line");
+        assert_eq!(enc[2], 0x2E, "dot incorrectly escaped at last position");
+    }
+
+    // --- 26a: wrap-around at exactly line_len ---
+
+    #[test]
+    fn line_wrap_inserts_crlf_at_boundary() {
+        // line_len=3: every 3 input bytes produce one CRLF.
+        let data = [0x00u8; 6];
+        let enc = encode(&data, 3);
+        assert_eq!(&enc[3..5], b"\r\n", "CRLF missing after first full line");
+        assert_eq!(&enc[8..10], b"\r\n", "CRLF missing after second full line");
+        assert_eq!(enc.len(), 10); // 3+CRLF + 3+CRLF
+    }
+
+    #[test]
+    fn trailing_crlf_added_for_partial_line() {
+        let data = [0x00u8; 5];
+        let enc = encode(&data, 3);
+        // Lines: 3 bytes + CRLF, then 2 bytes + CRLF.
+        assert_eq!(enc.len(), 9);
+        assert_eq!(&enc[7..], b"\r\n");
+    }
+
+    // --- 26a: full 256-byte round-trip ---
+
+    #[test]
+    fn full_256_byte_round_trip() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(decode(&encode(&data, 128)), data);
     }
 }
