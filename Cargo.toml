@@ -28,7 +28,7 @@ name = "pesto"
 path = "src/lib.rs"
 
 [dependencies]
-parmesan = { path = "crates/parmesan", default-features = false }
+parmesan = { package = "parmesan-par2", path = "crates/parmesan", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 md-5 = { version = "0.10", features = ["asm"] }
