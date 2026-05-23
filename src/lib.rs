@@ -34,7 +34,7 @@ pub mod nfo;
 pub mod nntp;
 pub mod notify;
 pub mod nzb;
-pub use parmesan_core as par2;
+pub use parmesan as par2;
 pub mod poster;
 pub mod progress;
 pub mod resume;

@@ -2,15 +2,16 @@ pub mod altmap;
 pub mod encoder;
 pub mod gf16;
 pub mod layout;
+pub mod ops;
 pub mod packet;
 pub mod shuffle2x;
+pub mod worker;
 pub mod yenc;
 
 pub use encoder::{altmap_buffer_size, shuffle2x_buffer_size};
 
 /// Multiplication backend for the Reed-Solomon encoder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum SimdPath {
     /// Auto-detect the fastest supported path for the current CPU.
     #[default]
@@ -148,11 +149,8 @@ pub fn performance_core_count() -> usize {
         }
 
         if !paired_leaders.is_empty() && !solo.is_empty() {
-            // Hybrid CPU: include both P-cores and E-cores (all physical, no HT).
             return paired_leaders.len() + solo.len();
         }
     }
     physical_core_count()
 }
-pub mod worker;
-pub mod ops;
