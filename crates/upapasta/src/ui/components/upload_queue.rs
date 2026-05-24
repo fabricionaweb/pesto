@@ -64,6 +64,7 @@ impl UploadQueue {
         }
     }
 
+    #[allow(dead_code)]
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .items
