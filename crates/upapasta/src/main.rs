@@ -35,25 +35,8 @@ async fn main() -> io::Result<()> {
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Spawn a background task that simulates pesto progress events
-    // (this will be replaced by real pesto::post() receiver in the next step)
-    let tx_progress = tx.clone();
-    tokio::spawn(async move {
-        let mut i = 0u32;
-        loop {
-            tokio::time::sleep(Duration::from_millis(380)).await;
-            let _ = tx_progress.send(AppEvent::Progress(format!(
-                "article {}/{} posted @ {:.1} MB/s",
-                i % 47 + 1,
-                47,
-                12.4 + (i as f32 % 5.0) * 0.3
-            )));
-            i += 1;
-            if i.is_multiple_of(11) {
-                let _ = tx_progress.send(AppEvent::Progress("PAR2 block verified".into()));
-            }
-        }
-    });
+    // NOTE: The old fake progress simulator was removed.
+    // Real progress now only comes from actual `pesto::post()` calls.
 
     // Spawn keyboard event task using EventStream (async crossterm)
     let tx_keys = tx.clone();

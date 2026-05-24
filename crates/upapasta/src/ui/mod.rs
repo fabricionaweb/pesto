@@ -90,7 +90,8 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 
             let content = Paragraph::new(
                 "This screen is under construction.\n\n\
-                 Current focus is on the **Browser** (file picker) and **Dashboard** (queue + live logs).\n\
+                 • History & Catalog (Phase 40c)\n\
+                 • Better error handling during real uploads\n\n\
                  Press Tab to cycle screens.",
             )
             .block(Block::default().borders(Borders::ALL).title(title));
@@ -134,7 +135,17 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     } else if !app.upload_queue.items.is_empty() {
         draw_upload_settings_summary(f, app, chunks[0]);
     } else {
-        app.upload_queue.render(f, chunks[0]);
+        let idle = Paragraph::new(
+            "No files in queue.\n\n\
+             Go to Browser tab (press Tab) → navigate with j/k/Enter → add files with Enter.\n\
+             Then come back here and press 'u' to start upload.",
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Dashboard — Ready "),
+        );
+        f.render_widget(idle, chunks[0]);
     }
 
     app.log_panel.render(f, chunks[1]);

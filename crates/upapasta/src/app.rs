@@ -169,7 +169,7 @@ impl App {
             config_path,
             config_error,
         };
-        app.upload_queue.add("example.nfo".to_string());
+        // Do NOT add example files on startup anymore (was confusing users)
         app.log_panel
             .push("UpaPasta v2 started — event-driven TUI ready".to_string());
 
