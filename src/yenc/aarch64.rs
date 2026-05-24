@@ -160,7 +160,8 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         // Pre-add 64 to escaped characters
                         let escaped_chunk_s = vaddq_u8(chunk_s, vandq_u8(chunk_m, v_add64));
 
-                        let de_lo = vcombine_u8(vget_low_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
+                        let de_lo =
+                            vcombine_u8(vget_low_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
                         let res_lo = vqtbl1q_u8(
                             de_lo,
                             vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr()),
@@ -168,7 +169,8 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         vst1q_u8(out_ptr, res_lo);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
 
-                        let de_hi = vcombine_u8(vget_high_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
+                        let de_hi =
+                            vcombine_u8(vget_high_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
                         let res_hi = vqtbl1q_u8(
                             de_hi,
                             vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr()),
@@ -211,7 +213,8 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         // Pre-add 64 to escaped characters
                         let escaped_chunk_s = vaddq_u8(chunk_s, vandq_u8(chunk_m, v_add64));
 
-                        let de_lo = vcombine_u8(vget_low_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
+                        let de_lo =
+                            vcombine_u8(vget_low_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
                         let res_lo = vqtbl1q_u8(
                             de_lo,
                             vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr()),
@@ -219,7 +222,8 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         vst1q_u8(out_ptr, res_lo);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
 
-                        let de_hi = vcombine_u8(vget_high_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
+                        let de_hi =
+                            vcombine_u8(vget_high_u8(escaped_chunk_s), vget_low_u8(v_eq_const));
                         let res_hi = vqtbl1q_u8(
                             de_hi,
                             vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr()),
