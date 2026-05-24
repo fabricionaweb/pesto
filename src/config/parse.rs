@@ -227,11 +227,11 @@ impl Config {
             check_retries: cli
                 .check_retries
                 .unwrap_or_else(|| file.posting.check_retries.unwrap_or(2)),
+            // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth
                 .or(file.posting.pipeline_depth)
-                .unwrap_or(DEFAULT_PIPELINE_DEPTH)
-                .max(1),
+                .unwrap_or(DEFAULT_PIPELINE_DEPTH),
         })
     }
 }

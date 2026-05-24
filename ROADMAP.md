@@ -113,12 +113,21 @@ high-latency links (>50 ms RTT).
 - [x] Pipelining is automatically disabled when `--verify` is active (STAT
   after each article is incompatible with batched response reads).
 
-### 25b — Adaptive pipeline depth
+### 25b — Adaptive pipeline depth ✅
 
-- [ ] Measure per-article RTT during warm-up phase.
-- [ ] Automatically compute optimal pipeline depth:
-  `depth = ceil(RTT / article_encode_time)`.
-- [ ] Cap at server-side queue limit (detect `441 Too many articles` responses).
+- [x] `pipeline_depth = 0` (new default) enables adaptive mode; explicit values
+  override it as before.
+- [x] Warm-up: the first article on each connection is posted sequentially.
+  `encode_time` (CPU) and `post_time` (send + RTT) are measured via `Instant`.
+- [x] `depth = clamp(1, MAX_AUTO_PIPELINE_DEPTH=8, ceil(post_time / encode_time))`.
+  Since encoding is ~375 µs and a typical post takes 5–100 ms, depth naturally
+  converges to 8 on high-latency links and 1–2 on low-latency ones.
+- [x] Computed depth logged at `INFO` level: `adaptive pipeline depth computed`.
+- [x] `--pipeline-depth 1` still forces sequential; `--verify` always forces
+  sequential regardless of the flag (STAT after each article is incompatible
+  with batched response reads).
+- [ ] Cap at server-side queue limit (detect `441 Too many articles`): deferred
+  to a future hardening phase — the depth=8 cap avoids triggering it in practice.
 
 ---
 
@@ -232,15 +241,14 @@ Results after 28a:
   ll=128  encode (disp): **1865 MB/s** (1.55× nyuu) ✓
   ll=256  encode (disp): **2365 MB/s** (0.99× nyuu) — 1% gap remaining
 
-### 27d — DEFAULT_LINE_LENGTH: evaluate raising to 256 *(medium complexity)*
+### 27d — DEFAULT_LINE_LENGTH: evaluate raising to 256 *(closed — keep 128)*
 
-`line_len=128` is historical (yEnc draft spec, 2001). Many modern servers
-accept 256. nyuu itself defaults to 128 but supports 256.
+`line_len=128` is historical (yEnc draft spec, 2001). nyuu also defaults to
+128. No evidence of broad server/indexer acceptance of 256 as the standard.
 
-- [ ] Survey what Usenet indexers and servers actually accept today.
-- [ ] If compatible: raise `DEFAULT_LINE_LENGTH` to 256 and update config
-  documentation. Keep 128 available via `--line-length` flag.
-- [ ] Re-run integration tests and `encode_part` golden-reference tests.
+**Decision:** keep `DEFAULT_LINE_LENGTH = 128`. The `--line-length` flag allows
+opting in to 256, which gives ~2365 MB/s (0.99× nyuu). At ll=128 pesto already
+reaches 1865 MB/s (1.55× nyuu), so the default is already comfortably ahead.
 
 ---
 

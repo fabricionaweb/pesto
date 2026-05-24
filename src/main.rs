@@ -118,8 +118,9 @@ struct Cli {
     retries: Option<u32>,
 
     /// Articles to pipeline per connection before reading responses.
-    /// Higher values reduce per-article RTT cost on high-latency links.
-    /// Incompatible with --verify [config: posting.pipeline_depth, default 1].
+    /// 0 (default) = adaptive: measures RTT on the first article and computes
+    /// the optimal depth automatically (max 8). Set to 1 for sequential.
+    /// Incompatible with --verify [config: posting.pipeline_depth, default 0].
     #[arg(long, value_name = "N")]
     pipeline_depth: Option<usize>,
 

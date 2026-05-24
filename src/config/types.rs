@@ -16,8 +16,10 @@ pub const DEFAULT_LINE_LENGTH: usize = 128;
 pub const DEFAULT_RETRIES: u32 = 3;
 /// Default pause between failed post attempts, in seconds.
 pub const DEFAULT_RETRY_DELAY: u64 = 1;
-/// Default number of articles to pipeline per connection (1 = sequential).
-pub const DEFAULT_PIPELINE_DEPTH: usize = 1;
+/// Default pipeline depth: 0 = adaptive (auto-measure RTT and compute depth).
+pub const DEFAULT_PIPELINE_DEPTH: usize = 0;
+/// Maximum depth the adaptive pipeline will auto-select.
+pub const MAX_AUTO_PIPELINE_DEPTH: usize = 8;
 /// Default percentage of PAR2 recovery data to generate.
 pub const DEFAULT_PAR2: u8 = 10;
 

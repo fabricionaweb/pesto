@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use crate::article::{
     default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article,
 };
-use crate::config::{Config, ObfuscateMode};
+use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
@@ -1169,13 +1169,18 @@ async fn worker(
         },
     );
 
-    // Use pipelining only when depth > 1 and verify mode is off (STAT after
-    // each article is incompatible with out-of-order response reads).
-    let pipeline_depth = if shared.config.verify {
+    // pipeline_depth == 0 means adaptive: measure RTT on the first article and
+    // compute depth = ceil(post_time / encode_time), capped at MAX_AUTO_PIPELINE_DEPTH.
+    // verify mode forces sequential (pipelining and STAT are incompatible).
+    let cfg_depth = shared.config.pipeline_depth;
+    let is_adaptive = cfg_depth == 0 && !shared.config.verify;
+    // Effective depth used for batch-filling; starts at 1 until warm-up is done.
+    let mut effective_depth: usize = if shared.config.verify || is_adaptive || cfg_depth == 1 {
         1
     } else {
-        shared.config.pipeline_depth.max(1)
+        cfg_depth
     };
+    let mut warmup_done = !is_adaptive; // true from the start when not adaptive
 
     loop {
         if shared.cancelled.load(Ordering::Relaxed) {
@@ -1193,9 +1198,9 @@ async fn worker(
         let mut batch = vec![first];
 
         // Non-blocking: try to fill the rest of the pipeline slot.
-        if pipeline_depth > 1 {
+        if effective_depth > 1 {
             let mut rx = rx.lock().await;
-            while batch.len() < pipeline_depth {
+            while batch.len() < effective_depth {
                 match rx.try_recv() {
                     Ok(t) => batch.push(t),
                     Err(_) => break,
@@ -1213,6 +1218,7 @@ async fn worker(
             message_id: String,
             headers: Vec<u8>,
             encoded: yenc::EncodedPart,
+            encode_time: Duration,
         }
         let mut pending: Vec<Pending> = Vec::with_capacity(batch.len());
 
@@ -1249,6 +1255,7 @@ async fn worker(
                 }
             }
 
+            let t_enc = Instant::now();
             let encoded = yenc::encode_part(
                 &task.meta.yenc_name,
                 task.meta.size,
@@ -1261,6 +1268,7 @@ async fn worker(
                 shared.config.line_length,
                 None,
             );
+            let encode_time = t_enc.elapsed();
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
             let article = Article {
                 message_id: message_id.clone(),
@@ -1276,6 +1284,7 @@ async fn worker(
                 message_id,
                 headers,
                 encoded,
+                encode_time,
             });
         }
 
@@ -1334,6 +1343,7 @@ async fn worker(
                         continue;
                     }
                 };
+                let t_post = Instant::now();
                 match conn.post_parts(&p.headers, &p.encoded.body).await {
                     Ok(()) => {
                         if shared.config.verify {
@@ -1358,6 +1368,23 @@ async fn worker(
                                 }
                             }
                         } else {
+                            // Adaptive warm-up: compute pipeline depth from the
+                            // ratio of post time (send + RTT) to encode time.
+                            if is_adaptive && !warmup_done {
+                                let post_us = t_post.elapsed().as_micros().max(1);
+                                let enc_us = p.encode_time.as_micros().max(1);
+                                let ratio = post_us.saturating_div(enc_us);
+                                let depth = (ratio as usize).clamp(1, MAX_AUTO_PIPELINE_DEPTH);
+                                effective_depth = depth;
+                                warmup_done = true;
+                                info!(
+                                    conn = conn_id,
+                                    depth,
+                                    post_ms = t_post.elapsed().as_millis(),
+                                    encode_us = enc_us,
+                                    "adaptive pipeline depth computed"
+                                );
+                            }
                             debug!(segment = %p.message_id, "posted");
                             posted = true;
                             break;
