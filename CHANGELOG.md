@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.23] — 2026-05-23
+
+### Performance
+- **yEnc Performance Parity (>2.2 GB/s)**:
+  - SIMD-accelerated yEnc escaping using `PSHUFB` expansion tables.
+  - Refactored encoder to use direct pointer writes, eliminating vector bounds checks.
+  - Optimized AVX2 path for 32-byte chunks.
+  - Benchmarked to exceed `node-yencode` throughput (reaching ~2200 MB/s on modern CPUs).
+
+### Added
+- Comprehensive yEnc benchmark suite vs `node-yencode` (`bench_pesto_yenc_vs_node.sh`).
+
 ## [0.2.22] — 2026-05-23
 
 ### Changed

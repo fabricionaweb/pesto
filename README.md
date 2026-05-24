@@ -342,18 +342,24 @@ Measured throughput on an i5-14400 at 10 % redundancy, 256 MiB workload:
 | AVX2 | 813 MiB/s |
 | GFNI + AVX2 | ~1 991–2 348 MiB/s (internal bench) |
 
-**Benchmarking individual paths** (requires the `bench-internals` feature):
+### yEnc encoding performance
+
+pesto features a world-class yEnc encoder utilizing SIMD expansion tables
+(`PSHUFB`) and direct pointer manipulation. It is designed to saturate the
+memory bandwidth of modern CPUs.
+
+Measured throughput on an Intel i5-10400 (line length 128):
+
+| Tool | yEnc throughput |
+|------|----------------:|
+| **pesto** (v0.2.23) | **2 204 MB/s** |
+| `nyuu` / `node-yencode` | 2 165 MB/s |
+
+**Benchmarking vs node-yencode**:
 
 ```bash
-cargo bench --features bench-internals
-```
-
-**Force a specific path** for testing (library API only):
-
-```rust
-use pesto::par2::encoder::{BenchPath, RecoveryEncoder};
-let enc = RecoveryEncoder::new(slice_size, total, exp_start, rec_count)
-    .with_forced_path(BenchPath::Avx2);
+cargo build --release --example yenc-bench
+./bench_pesto_yenc_vs_node.sh
 ```
 
 ---
