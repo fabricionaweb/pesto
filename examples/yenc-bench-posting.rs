@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let file_size = data.len() as u64;
     let segment_size = 700_000usize; // ~700KB per article (typical usenet article size)
-    let num_segments = ((file_size as usize) + segment_size - 1) / segment_size;
+    let num_segments = (file_size as usize).div_ceil(segment_size);
 
     // Configure thread pool if num_threads specified
     if num_threads > 0 {
@@ -61,13 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Benchmark: encode all segments in parallel, multiple iterations
-    let iterations = if file_size < 1024 * 1024 {
-        3
-    } else if file_size < 100 * 1024 * 1024 {
-        1
-    } else {
-        1
-    };
+    let iterations = if file_size < 1024 * 1024 { 3 } else { 1 };
 
     let start = Instant::now();
     for _ in 0..iterations {
