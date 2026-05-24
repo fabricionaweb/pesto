@@ -102,13 +102,15 @@ pub fn physical_core_count() -> usize {
         .unwrap_or(1)
 }
 
-/// Number of performance-class cores. On hybrid CPUs (Intel 12th gen and later)
-/// Detects hybrid layout via Linux topology: P-cores expose two
-/// `thread_siblings_list` entries (HT pair), E-cores stand alone.
-/// On hybrid CPUs (P + E mix) return all physical cores (paired leaders + solo),
-/// one rayon thread per physical core. On non-hybrid CPUs fall back to
-/// [`physical_core_count`]. Hyperthreads are always excluded — they contend for
-/// the same execution ports and add noise on pure SIMD/ALU workloads.
+/// Number of physical cores on hybrid CPUs.
+/// On hybrid CPUs (Intel 12th gen+), detects P-cores (high-performance) vs
+/// E-cores (efficiency) via Linux topology: P-cores have 2+ thread_siblings
+/// (hyperthreading), E-cores have 1 (standalone).
+///
+/// Returns count of P-core leaders + E-cores (one thread per physical core)
+/// for work distribution. Hyperthreads are excluded as they contend for the
+/// same execution ports and add noise on CPU-bound workloads.
+/// On non-hybrid CPUs falls back to [`physical_core_count`].
 pub fn performance_core_count() -> usize {
     #[cfg(target_os = "linux")]
     {
