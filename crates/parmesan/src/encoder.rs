@@ -541,9 +541,11 @@ impl RecoveryEncoder {
         }
 
         // ALTMAP path: AVX2 XOR bit-dependency kernel (Phase 27e).
+        // dep_tables is None on GFNI-capable CPUs (build_dep_tables skips them);
+        // fall through to Shuffle2x on those machines.
         #[cfg(target_arch = "x86_64")]
         if matches!(self.buffers, RecoveryBufferSet::Altmap(_)) {
-            if std::is_x86_feature_detected!("avx2") {
+            if std::is_x86_feature_detected!("avx2") && self.dep_tables.is_some() {
                 unsafe {
                     self.flush_avx2_altmap();
                 }
@@ -4024,8 +4026,10 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn new_altmap_produces_correct_recovery_data() {
         // Verify that new_altmap() produces byte-identical recovery data to new().
-        // Only meaningful on x86_64 with AVX2 hardware; skip otherwise.
-        if !std::is_x86_feature_detected!("avx2") {
+        // Only meaningful on AVX2-without-GFNI hardware: dep_tables are not built
+        // on GFNI CPUs (build_dep_tables returns None), so the ALTMAP flush path
+        // is inactive and the test would compare zeros against real output.
+        if !std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("gfni") {
             return;
         }
 
