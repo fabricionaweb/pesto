@@ -5,25 +5,61 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Sparkline, Tabs},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs},
     Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let area = f.area();
+
+    // Graceful degradation: terminal too small to render meaningfully
+    if area.width < 40 || area.height < 10 {
+        let msg = Paragraph::new(format!(
+            "Terminal too small\n{}x{} — need 40x10",
+            area.width, area.height
+        ))
+        .style(Style::default().fg(Color::Red))
+        .block(Block::default().borders(Borders::ALL));
+        f.render_widget(msg, area);
+        return;
+    }
+
+    // Compact mode: skip header when height is tight
+    let compact = area.height < 20;
+
+    let constraints: Vec<Constraint> = if compact {
+        vec![
+            Constraint::Length(3), // Tabs only
+            Constraint::Min(5),    // Main content
+            Constraint::Length(1), // Status (slim)
+        ]
+    } else {
+        vec![
             Constraint::Length(3), // Header
             Constraint::Length(3), // Tabs
             Constraint::Min(10),   // Main content
             Constraint::Length(3), // Status bar
-        ])
-        .split(f.area());
+        ]
+    };
 
-    draw_header(f, chunks[0]);
-    draw_tabs(f, app, chunks[1]);
-    draw_main(f, app, chunks[2]);
-    draw_status_bar(f, app, chunks[3]);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    if compact {
+        draw_tabs(f, app, chunks[0]);
+        draw_main(f, app, chunks[1]);
+        // slim status: single line without borders
+        let slim = Paragraph::new(app.status_bar.message.clone())
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(slim, chunks[2]);
+    } else {
+        draw_header(f, chunks[0]);
+        draw_tabs(f, app, chunks[1]);
+        draw_main(f, app, chunks[2]);
+        draw_status_bar(f, app, chunks[3]);
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect) {
@@ -81,21 +117,17 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         AppState::Dashboard => {
             draw_dashboard(f, app, area);
         }
+        AppState::History => {
+            draw_history(f, app, area);
+        }
         _ => {
-            let title = match app.state {
-                AppState::History => "History & Catalog",
-                AppState::Config => "Configuration",
-                _ => "Screen",
-            };
-
-            let content = Paragraph::new(
-                "This screen is under construction.\n\n\
-                 • History & Catalog (Phase 40c)\n\
-                 • Better error handling during real uploads\n\n\
-                 Press Tab to cycle screens.",
-            )
-            .block(Block::default().borders(Borders::ALL).title(title));
-
+            let content =
+                Paragraph::new("Configuration screen (Phase 40d).\n\nPress Tab to cycle screens.")
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Configuration "),
+                    );
             f.render_widget(content, area);
         }
     }
@@ -239,43 +271,94 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
-    use ratatui::text::Line;
+    use crate::app::FileStatus;
 
-    let mut lines: Vec<Line> = vec![Line::from(" Per-file Progress:")];
+    let files = &app.progress.files;
+    let n = files.len();
 
-    for fp in &app.progress.files {
+    // Outer block
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Files ({}) ", n));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    if n == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Allocate up to 3 lines per file (name + gauge + gap), constrained by height
+    let rows_available = inner.height as usize;
+    let per_file = 2usize; // name line + gauge line
+    let max_files = (rows_available / per_file).max(1);
+    let shown = n.min(max_files);
+
+    // Build constraints: alternating name (1) + gauge (1) rows
+    let constraints: Vec<Constraint> = (0..shown)
+        .flat_map(|_| [Constraint::Length(1), Constraint::Length(1)])
+        .collect();
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for (i, fp) in files.iter().take(shown).enumerate() {
         let pct = if fp.total_segments > 0 {
-            (fp.done_segments as f64 / fp.total_segments as f64 * 100.0) as u16
+            (fp.done_segments as f64 / fp.total_segments as f64 * 100.0).min(100.0) as u16
         } else {
             0
         };
 
-        let status_icon = match fp.status {
-            crate::app::FileStatus::Done => "✓",
-            crate::app::FileStatus::Failed => "✗",
-            crate::app::FileStatus::Active => "▶",
-            _ => " ",
+        let (status_icon, icon_color) = match fp.status {
+            FileStatus::Done => ("✓", Color::Green),
+            FileStatus::Failed => ("✗", Color::Red),
+            FileStatus::Active => ("▶", Color::Cyan),
+            FileStatus::Pending => (" ", Color::DarkGray),
         };
 
-        let short_name = if fp.name.len() > 28 {
-            format!("{}...", &fp.name[..25])
+        let name_row = rows[i * 2];
+        let gauge_row = rows[i * 2 + 1];
+
+        // Name line with status icon
+        let max_name = (name_row.width as usize).saturating_sub(4);
+        let short_name = if fp.name.len() > max_name && max_name > 3 {
+            format!("{}…", &fp.name[..max_name - 1])
         } else {
             fp.name.clone()
         };
+        let name_line = Line::from(vec![
+            Span::styled(
+                format!(" {} ", status_icon),
+                Style::default().fg(icon_color),
+            ),
+            Span::raw(short_name),
+        ]);
+        f.render_widget(Paragraph::new(name_line), name_row);
 
-        lines.push(Line::from(format!(
-            " {} {} {:3}% ({}/{})",
-            status_icon, short_name, pct, fp.done_segments, fp.total_segments
-        )));
+        // Gauge
+        let gauge_color = match fp.status {
+            FileStatus::Done => Color::Green,
+            FileStatus::Failed => Color::Red,
+            FileStatus::Active => Color::Cyan,
+            FileStatus::Pending => Color::DarkGray,
+        };
+        let label = if fp.total_segments > 0 {
+            format!("{pct}%  {}/{}", fp.done_segments, fp.total_segments)
+        } else {
+            "waiting…".to_string()
+        };
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+            .percent(pct)
+            .label(label);
+        f.render_widget(gauge, gauge_row);
     }
 
-    let para = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Upload Files "),
-    );
-
-    f.render_widget(para, area);
+    // If we couldn't show all files, show a summary line
+    if shown < n {
+        // There's no room; the outer block title already shows the count
+    }
 }
 
 fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
@@ -323,4 +406,259 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     app.status_bar.render(f, area);
+}
+
+// ── History screen ─────────────────────────────────────────────────────────
+
+fn draw_history(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.catalog.is_none() {
+        let msg = Paragraph::new(
+            "No catalog available.\n\nThe catalog could not be opened.\nCheck permissions for ~/.local/share/upapasta/",
+        )
+        .block(Block::default().borders(Borders::ALL).title(" History "));
+        f.render_widget(msg, area);
+        return;
+    }
+
+    // Layout: search bar on top, list left + detail right, stats at bottom
+    let show_stats = app.history.show_stats;
+    let mut constraints = vec![
+        Constraint::Length(3), // search bar
+        Constraint::Min(6),    // list + detail
+    ];
+    if show_stats {
+        constraints.push(Constraint::Length(10)); // stats panel
+    }
+
+    let vchunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    draw_history_search(f, app, vchunks[0]);
+
+    let hchunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(vchunks[1]);
+
+    draw_history_list(f, app, hchunks[0]);
+    draw_history_detail(f, app, hchunks[1]);
+
+    if show_stats {
+        draw_history_stats(f, app, vchunks[2]);
+    }
+}
+
+fn draw_history_search(f: &mut Frame, app: &App, area: Rect) {
+    let is_searching = app.history.searching;
+    let query = &app.history.query;
+
+    let content = if is_searching {
+        format!(" /{}_", query)
+    } else if query.is_empty() {
+        " Press / to search, s for stats, Tab to switch tab".to_string()
+    } else {
+        format!(" Filter: {}  (/ to edit, Esc to clear)", query)
+    };
+
+    let border_style = if is_searching {
+        Style::default().fg(Color::Yellow)
+    } else if !query.is_empty() {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let title = format!(" History ({} records) ", app.history.rows.len());
+    let para = Paragraph::new(content).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(border_style),
+    );
+    f.render_widget(para, area);
+}
+
+fn draw_history_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let rows = &app.history.rows;
+
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|r| {
+            let date = r.uploaded_at.format("%Y-%m-%d").to_string();
+            let size = r
+                .size_bytes
+                .map(|b| format_bytes(b as u64))
+                .unwrap_or_else(|| "—".to_string());
+            let cat_color = category_color(&r.category);
+            let short_name = if r.original_name.len() > 34 {
+                format!("{}…", &r.original_name[..33])
+            } else {
+                r.original_name.clone()
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", date), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<35}", short_name),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("{:<8}", r.category), Style::default().fg(cat_color)),
+                Span::styled(size, Style::default().fg(Color::Cyan)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let selected = app.history.selected;
+    let mut state = ListState::default();
+    if !rows.is_empty() {
+        state.select(Some(selected));
+    }
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Uploads (j/k to navigate) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_history_detail(f: &mut Frame, app: &App, area: Rect) {
+    let rows = &app.history.rows;
+    if rows.is_empty() || app.history.selected >= rows.len() {
+        let msg = Paragraph::new(" No record selected.")
+            .block(Block::default().borders(Borders::ALL).title(" Detail "));
+        f.render_widget(msg, area);
+        return;
+    }
+
+    let r = &rows[app.history.selected];
+    let date = r.uploaded_at.format("%Y-%m-%d %H:%M UTC").to_string();
+    let size = r
+        .size_bytes
+        .map(|b| format_bytes(b as u64))
+        .unwrap_or_else(|| "unknown".to_string());
+    let dur = r
+        .upload_duration_s
+        .map(|s| {
+            let m = s as u64 / 60;
+            let sec = s as u64 % 60;
+            if m > 0 {
+                format!("{}m {:02}s", m, sec)
+            } else {
+                format!("{:.1}s", s)
+            }
+        })
+        .unwrap_or_else(|| "—".to_string());
+    let group = r.usenet_group.as_deref().unwrap_or("—");
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" Name    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(r.original_name.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled(" Date    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(date),
+        ]),
+        Line::from(vec![
+            Span::styled(" Category", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {}", r.category),
+                Style::default().fg(category_color(&r.category)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" Size    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!(" {}", size)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Duration", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!(" {}", dur)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Group   ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!(" {}", group)),
+        ]),
+    ];
+
+    let para =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Detail "));
+    f.render_widget(para, area);
+}
+
+fn draw_history_stats(f: &mut Frame, app: &App, area: Rect) {
+    let Some(ref stats) = app.history.stats else {
+        let msg = Paragraph::new(" Loading stats…")
+            .block(Block::default().borders(Borders::ALL).title(" Stats "));
+        f.render_widget(msg, area);
+        return;
+    };
+
+    let total_gb = stats.total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    let mut lines = vec![
+        Line::from(format!(
+            " Total: {} uploads  |  {:.2} GB",
+            stats.total_uploads, total_gb
+        )),
+        Line::from(""),
+    ];
+
+    // Categories
+    let cats: Vec<String> = stats
+        .by_category
+        .iter()
+        .map(|(cat, n)| format!("{}: {}", cat, n))
+        .collect();
+    lines.push(Line::from(format!(" By category — {}", cats.join("  "))));
+
+    // Monthly bytes
+    if !stats.bytes_by_month.is_empty() {
+        lines.push(Line::from(""));
+        let month_strs: Vec<String> = stats
+            .bytes_by_month
+            .iter()
+            .map(|(m, b)| format!("{}: {:.1}GB", m, *b as f64 / 1024.0 / 1024.0 / 1024.0))
+            .collect();
+        lines.push(Line::from(format!(" Monthly — {}", month_strs.join("  "))));
+    }
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Catalog Stats "),
+    );
+    f.render_widget(para, area);
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+fn format_bytes(b: u64) -> String {
+    if b >= 1_073_741_824 {
+        format!("{:.1}GB", b as f64 / 1_073_741_824.0)
+    } else if b >= 1_048_576 {
+        format!("{:.0}MB", b as f64 / 1_048_576.0)
+    } else if b >= 1024 {
+        format!("{:.0}KB", b as f64 / 1024.0)
+    } else {
+        format!("{}B", b)
+    }
+}
+
+fn category_color(cat: &str) -> Color {
+    match cat {
+        "Movie" => Color::Magenta,
+        "TV" => Color::Blue,
+        "Anime" => Color::Yellow,
+        _ => Color::DarkGray,
+    }
 }

@@ -64,6 +64,24 @@ impl UploadQueue {
         }
     }
 
+    /// Move the selected item one position up in the queue.
+    pub fn move_selected_up(&mut self) {
+        if self.items.len() < 2 || self.selected == 0 {
+            return;
+        }
+        self.items.swap(self.selected, self.selected - 1);
+        self.selected -= 1;
+    }
+
+    /// Move the selected item one position down in the queue.
+    pub fn move_selected_down(&mut self) {
+        if self.items.len() < 2 || self.selected + 1 >= self.items.len() {
+            return;
+        }
+        self.items.swap(self.selected, self.selected + 1);
+        self.selected += 1;
+    }
+
     #[allow(dead_code)]
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self

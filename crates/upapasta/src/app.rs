@@ -1,3 +1,4 @@
+use crate::catalog::{Catalog, CatalogStats, NewUpload, UploadSummary};
 use crate::events::ProgressUpdate;
 use crate::ui::components::{FileTree, LogPanel, StatusBar, UploadQueue};
 use pesto::config::{self, Config as PestoConfig, FileConfig, ObfuscateMode};
@@ -133,6 +134,32 @@ pub struct App {
     pub config_path: Option<PathBuf>,
     #[allow(dead_code)]
     pub config_error: Option<String>,
+
+    /// Persistent upload catalog
+    pub catalog: Option<Catalog>,
+
+    /// History screen state
+    pub history: HistoryState,
+
+    /// Upload start time (to compute duration for the catalog record)
+    pub upload_started_at: Option<std::time::Instant>,
+}
+
+/// State for the History screen.
+#[derive(Debug, Default)]
+pub struct HistoryState {
+    /// Current search query (empty = show all)
+    pub query: String,
+    /// Whether the search input is active
+    pub searching: bool,
+    /// Cached list from last DB query
+    pub rows: Vec<UploadSummary>,
+    /// Selected row index in the list
+    pub selected: usize,
+    /// Cached stats
+    pub stats: Option<CatalogStats>,
+    /// Whether stats panel is expanded
+    pub show_stats: bool,
 }
 
 impl App {
@@ -155,6 +182,18 @@ impl App {
             "No config found — using dry-run mode".to_string()
         };
 
+        // Open (or create) the catalog and optionally import legacy JSONL
+        let catalog = crate::catalog::default_catalog_path().and_then(|p| {
+            match Catalog::open(&p) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    // Catalog failure is non-fatal
+                    eprintln!("catalog open error: {e}");
+                    None
+                }
+            }
+        });
+
         let mut app = Self {
             state: AppState::Browser,
             file_tree: FileTree::new(),
@@ -168,7 +207,27 @@ impl App {
             pesto_config,
             config_path,
             config_error,
+            catalog,
+            history: HistoryState::default(),
+            upload_started_at: None,
         };
+        // Import legacy JSONL once if catalog is empty
+        if let Some(ref cat) = app.catalog {
+            if !cat.is_populated() {
+                if let Some(jsonl) = crate::catalog::legacy_jsonl_path() {
+                    if jsonl.exists() {
+                        match cat.import_jsonl(&jsonl) {
+                            Ok((n, _)) if n > 0 => {
+                                app.log_panel
+                                    .push(format!("Imported {} records from legacy history", n));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
         // Do NOT add example files on startup anymore (was confusing users)
         app.log_panel
             .push("UpaPasta v2 started — event-driven TUI ready".to_string());
@@ -222,6 +281,7 @@ impl App {
 
         self.upload_in_progress = true;
         self.upload_queue.active = self.upload_queue.items.len();
+        self.upload_started_at = Some(Instant::now());
 
         let token = CancellationToken::new();
         self.current_cancel_token = Some(token.clone());
@@ -277,10 +337,43 @@ impl App {
     }
 
     pub fn upload_finished(&mut self, success: bool, cancelled: bool) {
+        let duration_s = self
+            .upload_started_at
+            .take()
+            .map(|t| t.elapsed().as_secs_f64());
+
         self.upload_in_progress = false;
         self.upload_paused = false;
         self.upload_queue.active = 0;
         self.progress.is_cancelled = cancelled;
+
+        // Record each uploaded file in the catalog
+        if success && !cancelled {
+            if let Some(ref cat) = self.catalog {
+                let size_each = if self.upload_queue.items.is_empty() {
+                    None
+                } else {
+                    self.progress
+                        .total_bytes
+                        .checked_div(self.upload_queue.items.len() as u64)
+                        .map(|b| b as i64)
+                };
+                let group = self
+                    .pesto_config
+                    .as_ref()
+                    .and_then(|c| c.groups.first().cloned());
+                let server = self.pesto_config.as_ref().map(|c| c.host.clone());
+                for name in &self.upload_queue.items {
+                    let mut rec = NewUpload::from_name(name.clone());
+                    rec.size_bytes = size_each;
+                    rec.upload_duration_s = duration_s;
+                    rec.usenet_group = group.clone();
+                    rec.nntp_server = server.clone();
+                    let _ = cat.record(&rec);
+                }
+            }
+        }
+
         self.progress.files.clear();
 
         if cancelled {
@@ -292,6 +385,9 @@ impl App {
         } else {
             self.status_bar.set("Upload finished with errors");
         }
+
+        // Refresh the history list if it's currently visible
+        self.refresh_history();
     }
 
     /// Called from the event loop when we receive a human log line
@@ -432,6 +528,50 @@ impl App {
                 verify: "Disabled (dry-run)".to_string(),
             }
         }
+    }
+
+    // ── History screen helpers ────────────────────────────────────────────
+
+    /// Reload the history list from the catalog (called on tab switch + after upload).
+    pub fn refresh_history(&mut self) {
+        let Some(ref cat) = self.catalog else { return };
+        let filter = if self.history.query.is_empty() {
+            None
+        } else {
+            Some(self.history.query.as_str())
+        };
+        match cat.list(filter, 500) {
+            Ok(rows) => {
+                self.history.rows = rows;
+                if self.history.selected >= self.history.rows.len() {
+                    self.history.selected = self.history.rows.len().saturating_sub(1);
+                }
+            }
+            Err(e) => {
+                self.log_panel.push(format!("catalog list error: {}", e));
+            }
+        }
+        if self.history.show_stats {
+            self.refresh_stats();
+        }
+    }
+
+    pub fn refresh_stats(&mut self) {
+        let Some(ref cat) = self.catalog else { return };
+        match cat.stats() {
+            Ok(s) => self.history.stats = Some(s),
+            Err(e) => self.log_panel.push(format!("catalog stats error: {}", e)),
+        }
+    }
+
+    pub fn history_select_next(&mut self) {
+        if !self.history.rows.is_empty() {
+            self.history.selected = (self.history.selected + 1).min(self.history.rows.len() - 1);
+        }
+    }
+
+    pub fn history_select_prev(&mut self) {
+        self.history.selected = self.history.selected.saturating_sub(1);
     }
 }
 

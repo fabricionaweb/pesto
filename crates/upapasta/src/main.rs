@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod app;
+mod catalog;
 mod events;
 mod ui;
 
@@ -85,9 +86,24 @@ async fn run_app<B: ratatui::backend::Backend>(
         while let Ok(event) = rx.try_recv() {
             match event {
                 AppEvent::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Tab => app.next_tab(),
-                    KeyCode::BackTab => app.prev_tab(),
+                    KeyCode::Char('q') if !app.log_panel.searching && !app.history.searching => {
+                        return Ok(())
+                    }
+                    KeyCode::Esc if !app.log_panel.searching && !app.history.searching => {
+                        return Ok(())
+                    }
+                    KeyCode::Tab => {
+                        app.next_tab();
+                        if app.state == app::AppState::History {
+                            app.refresh_history();
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        app.prev_tab();
+                        if app.state == app::AppState::History {
+                            app.refresh_history();
+                        }
+                    }
                     KeyCode::Char('h') if app.state == app::AppState::Browser => {
                         app.file_tree.toggle_hidden();
                     }
@@ -121,8 +137,23 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                         _ => {}
                     },
-                    KeyCode::Char('u') if app.state == app::AppState::Dashboard => {
+                    KeyCode::Char('u')
+                        if app.state == app::AppState::Dashboard && !app.log_panel.searching =>
+                    {
                         handle_upload_trigger(app, tx.clone());
+                    }
+                    // ── Log panel search (Dashboard) ───────────────────────
+                    _ if app.state == app::AppState::Dashboard && app.log_panel.searching => {
+                        match key.code {
+                            KeyCode::Esc => app.log_panel.search_clear(),
+                            KeyCode::Enter => app.log_panel.search_confirm(),
+                            KeyCode::Backspace => app.log_panel.search_pop(),
+                            KeyCode::Char(c) => app.log_panel.search_push(c),
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Char('/') if app.state == app::AppState::Dashboard => {
+                        app.log_panel.start_search();
                     }
                     // Log scrolling when on Dashboard
                     KeyCode::Up | KeyCode::Char('k') if app.state == app::AppState::Dashboard => {
@@ -143,7 +174,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('G') if app.state == app::AppState::Dashboard => {
                         app.log_panel.scroll_to_bottom();
                     }
-                    KeyCode::Char('a') if app.state == app::AppState::Dashboard => {
+                    KeyCode::Char('a')
+                        if app.state == app::AppState::Dashboard && !app.log_panel.searching =>
+                    {
                         app.log_panel.toggle_auto_scroll();
                     }
                     // Queue management on Dashboard
@@ -181,17 +214,82 @@ async fn run_app<B: ratatui::backend::Backend>(
                         // Send event so the upload task can react (for now UI-only pause)
                         let _ = tx.send(AppEvent::PauseUpload); // will be improved
                     }
-                    // Navigate queue with Shift or dedicated keys when on Dashboard
+                    // Navigate and reorder queue on Dashboard (Shift+J/K = move item)
+                    KeyCode::Char('J')
+                        if app.state == app::AppState::Dashboard && !app.upload_in_progress =>
+                    {
+                        app.upload_queue.move_selected_down();
+                        app.status_bar.set("Moved item down");
+                    }
+                    KeyCode::Char('K')
+                        if app.state == app::AppState::Dashboard && !app.upload_in_progress =>
+                    {
+                        app.upload_queue.move_selected_up();
+                        app.status_bar.set("Moved item up");
+                    }
+                    // Navigate queue selection (no reorder) during upload
                     KeyCode::Char('J') if app.state == app::AppState::Dashboard => {
                         app.upload_queue.select_next();
                     }
                     KeyCode::Char('K') if app.state == app::AppState::Dashboard => {
                         app.upload_queue.select_previous();
                     }
+                    // ── History screen keys ────────────────────────────────
+                    _ if app.state == app::AppState::History && !app.history.searching => {
+                        match key.code {
+                            KeyCode::Char('j') | KeyCode::Down => app.history_select_next(),
+                            KeyCode::Char('k') | KeyCode::Up => app.history_select_prev(),
+                            KeyCode::Char('s') => {
+                                app.history.show_stats = !app.history.show_stats;
+                                if app.history.show_stats {
+                                    app.refresh_stats();
+                                }
+                            }
+                            KeyCode::Char('/') => {
+                                app.history.searching = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ if app.state == app::AppState::History && app.history.searching => {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.history.searching = false;
+                                app.history.query.clear();
+                                app.refresh_history();
+                            }
+                            KeyCode::Enter => {
+                                app.history.searching = false;
+                                app.refresh_history();
+                            }
+                            KeyCode::Backspace => {
+                                app.history.query.pop();
+                                app.refresh_history();
+                            }
+                            KeyCode::Char(c) => {
+                                app.history.query.push(c);
+                                app.refresh_history();
+                            }
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 },
                 AppEvent::Progress(msg) => {
-                    app.handle_progress(msg);
+                    // Auto-classify ERROR/WARN lines
+                    let msg_lower = msg.to_lowercase();
+                    if msg_lower.starts_with("error") || msg_lower.starts_with("failed") {
+                        app.log_panel.push_error(msg.clone());
+                        app.status_bar.set(format!("Error: {}", msg));
+                    } else if msg_lower.starts_with("warn") {
+                        app.log_panel.push_warn(msg);
+                    } else {
+                        app.handle_progress(msg);
+                    }
+                }
+                AppEvent::UploadError(msg) => {
+                    app.log_panel.push_error(format!("ERROR: {}", msg));
+                    app.status_bar.set("Upload error — see logs for details");
                 }
                 AppEvent::ProgressUpdate(update) if !app.upload_paused => {
                     app.handle_progress_update(update);
@@ -260,12 +358,15 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
 
         let success = result.is_ok();
         let cancelled = result.as_ref().is_ok_and(|r| r.cancelled);
-        if let Err(e) = result {
+        if let Err(ref e) = result {
             if !e.is_cancelled() {
-                let _ = tx2.send(AppEvent::Progress(format!("ERROR: {}", e)));
+                let _ = tx2.send(AppEvent::UploadError(e.to_string()));
             }
         }
-        let _ = tx2.send(AppEvent::UploadFinished { success, cancelled });
+        let _ = tx2.send(AppEvent::UploadFinished {
+            success: success && result.is_ok(),
+            cancelled,
+        });
     });
 }
 

@@ -369,22 +369,23 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Event-driven architecture using `crossterm` event stream + `tokio::sync::mpsc`
 - [x] Real-time progress rendering from `pesto::post()` events (full `ProgressEvent` stream)
 - [x] Basic navigation and keyboard shortcuts (`q`, `j/k`, `Enter`, `Tab`, `u`, `h`, Backspace, etc.)
-- [ ] Scrollable & navigable LogPanel (↑/↓, PgUp/PgDn, auto-scroll toggle, search/filter)
+- [x] Scrollable & navigable LogPanel (↑/↓, PgUp/PgDn, auto-scroll toggle, search/filter with `/`)
 - [x] Live visual progress: accurate segment/byte tracking + speed + ETA from structured ProgressUpdate
 - [x] Throughput sparkline (ratatui Sparkline widget) showing recent speed history
-- [ ] Per-file progress bars and connection-level details
+- [x] Per-file Gauge progress bars (color-coded by status: pending/active/done/failed)
 - [x] Upload controls: cancel current upload (`x` key) using `CancellationToken`
 - [x] Pause/resume upload (`p` key) - UI + stats freeze (full worker pause pending pesto API)
-- [ ] Queue management: remove items (Del), clear queue, basic reordering
-- [ ] Graceful error display and recovery during long uploads (connection loss, auth failures, etc.)
-- [ ] Responsive layout and graceful degradation on small terminals
-- [ ] Theme support (dark/light + user-configurable colors) and responsive layout
+- [x] Queue management: remove items (`d`/Del), clear queue (`c`), reordering (Shift+J/K)
+- [x] Graceful error display: ERROR/WARN lines in red/yellow, UploadError event to status bar
+- [x] Responsive layout: compact mode < 20 lines, "too small" guard < 40×10
+- [ ] Theme support (dark/light + user-configurable colors)
 
 ### 40c — Catalog & Persistence
 
-- [ ] Persistent catalog (using `sled` or `rusqlite`)
-- [ ] Import history from legacy Python JSONL
-- [ ] Search, filtering and statistics views
+- [x] Persistent catalog (SQLite via `rusqlite` bundled, `~/.local/share/upapasta/catalog.db`)
+- [x] Import history from legacy Python JSONL (auto-import on first run, 3914 records)
+- [x] Search, filtering and statistics views (History tab: `/` to filter, `s` for stats panel)
+- [x] Record each upload to catalog on completion (name, size, duration, group, server, category)
 - [ ] NZB archive viewer
 
 ### 40d — Orchestration & Feature Parity
