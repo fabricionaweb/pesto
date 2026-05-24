@@ -44,9 +44,7 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     let last = data.len() - 1;
     let add42 = _mm_set1_epi8(42i8);
     let v_add64 = _mm_set1_epi8(64i8);
-    let v_lookup = _mm_setr_epi8(
-        -32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0,
-    );
+    let v_lookup = _mm_setr_epi8(-32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0);
     let v_eq_const = _mm_set1_epi8(b'=' as i8);
     let mut i = 0usize;
     let mut col = 0usize;
@@ -87,13 +85,13 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         while safe_rem >= 32 {
             let chunk_a = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
             let chunk_b = _mm_loadu_si128(data.as_ptr().add(i + 16) as *const __m128i);
-            
+
             let any_a = _mm_cmpeq_epi8(_mm_shuffle_epi8(v_lookup, _mm_abs_epi8(chunk_a)), chunk_a);
             let any_b = _mm_cmpeq_epi8(_mm_shuffle_epi8(v_lookup, _mm_abs_epi8(chunk_b)), chunk_b);
-            
+
             let mask_a = _mm_movemask_epi8(any_a) as u32;
             let mask_b = _mm_movemask_epi8(any_b) as u32;
-            
+
             let shifted_a = _mm_add_epi8(chunk_a, add42);
             let shifted_b = _mm_add_epi8(chunk_b, add42);
 
@@ -263,8 +261,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     let add42 = _mm256_set1_epi8(42i8);
     let v_add64 = _mm256_set1_epi8(64i8);
     let v_lookup = _mm256_setr_epi8(
-        -32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0,
-        -32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0,
+        -32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0, -32, 0, 0, 19, 0, 0, 0, 0, 0, 0,
+        -42, 0, 0, -29, 0, 0,
     );
     let v_eq_const = _mm_set1_epi8(b'=' as i8);
     let mut i = 0usize;
@@ -306,10 +304,16 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         while safe_rem >= 64 {
             let chunk0 = _mm256_loadu_si256(data.as_ptr().add(i) as *const __m256i);
             let chunk1 = _mm256_loadu_si256(data.as_ptr().add(i + 32) as *const __m256i);
-            
-            let any0 = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk0)), chunk0);
-            let any1 = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk1)), chunk1);
-            
+
+            let any0 = _mm256_cmpeq_epi8(
+                _mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk0)),
+                chunk0,
+            );
+            let any1 = _mm256_cmpeq_epi8(
+                _mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk1)),
+                chunk1,
+            );
+
             let mask0 = _mm256_movemask_epi8(any0) as u32;
             let mask1 = _mm256_movemask_epi8(any1) as u32;
 
@@ -321,7 +325,10 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                 _mm256_storeu_si256(out_ptr.add(32) as *mut __m256i, shifted1);
                 out_ptr = out_ptr.add(64);
             } else {
-                for (chunk, any, mask, shifted) in [(chunk0, any0, mask0, shifted0), (chunk1, any1, mask1, shifted1)] {
+                for (_chunk, any, mask, shifted) in [
+                    (chunk0, any0, mask0, shifted0),
+                    (chunk1, any1, mask1, shifted1),
+                ] {
                     if mask == 0 {
                         _mm256_storeu_si256(out_ptr as *mut __m256i, shifted);
                         out_ptr = out_ptr.add(32);
@@ -339,9 +346,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                                 out_ptr as *mut __m128i,
                                 _mm_shuffle_epi8(
                                     _mm_unpacklo_epi64(s_lo, v_eq_const),
-                                    _mm_loadu_si128(
-                                        SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
-                                    ),
+                                    _mm_loadu_si128(SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr()
+                                        as *const __m128i),
                                 ),
                             );
                             out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
@@ -350,9 +356,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                                 out_ptr as *mut __m128i,
                                 _mm_shuffle_epi8(
                                     _mm_unpackhi_epi64(s_lo, v_eq_const),
-                                    _mm_loadu_si128(
-                                        SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
-                                    ),
+                                    _mm_loadu_si128(SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr()
+                                        as *const __m128i),
                                 ),
                             );
                             out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
@@ -367,9 +372,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                                 out_ptr as *mut __m128i,
                                 _mm_shuffle_epi8(
                                     _mm_unpacklo_epi64(s_hi, v_eq_const),
-                                    _mm_loadu_si128(
-                                        SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
-                                    ),
+                                    _mm_loadu_si128(SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr()
+                                        as *const __m128i),
                                 ),
                             );
                             out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
@@ -378,9 +382,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                                 out_ptr as *mut __m128i,
                                 _mm_shuffle_epi8(
                                     _mm_unpackhi_epi64(s_hi, v_eq_const),
-                                    _mm_loadu_si128(
-                                        SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
-                                    ),
+                                    _mm_loadu_si128(SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr()
+                                        as *const __m128i),
                                 ),
                             );
                             out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
@@ -394,10 +397,11 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         }
         while safe_rem >= 32 {
             let chunk = _mm256_loadu_si256(data.as_ptr().add(i) as *const __m256i);
-            let any = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk)), chunk);
+            let any =
+                _mm256_cmpeq_epi8(_mm256_shuffle_epi8(v_lookup, _mm256_abs_epi8(chunk)), chunk);
             let mask = _mm256_movemask_epi8(any) as u32;
             let shifted = _mm256_add_epi8(chunk, add42);
-            
+
             if mask == 0 {
                 _mm256_storeu_si256(out_ptr as *mut __m256i, shifted);
                 out_ptr = out_ptr.add(32);
@@ -468,9 +472,7 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         }
         let add42_128 = _mm_set1_epi8(42i8);
         let v_add64_128 = _mm_set1_epi8(64i8);
-        let v_lookup_128 = _mm_setr_epi8(
-            -32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0,
-        );
+        let v_lookup_128 = _mm_setr_epi8(-32, 0, 0, 19, 0, 0, 0, 0, 0, 0, -42, 0, 0, -29, 0, 0);
         while safe_rem >= 16 {
             let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
             let any = _mm_cmpeq_epi8(_mm_shuffle_epi8(v_lookup_128, _mm_abs_epi8(chunk)), chunk);
