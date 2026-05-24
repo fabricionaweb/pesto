@@ -816,32 +816,40 @@ pesto dispatches automatically to the best SIMD path at runtime
 
 ### yEnc encoding throughput
 
-Benchmarked on Intel Core i5-14400 (16 logical cores), Linux, release build.
 Line length 128 bytes (Usenet default). Both tools use internal timers after
 warmup + N iterations (pure CPU, data already in memory).
 
-| Payload | pesto    | node-yencode |
-|---------|----------|--------------|
-| 100 MB  | 2 557 MB/s | 4 302 MB/s |
-| 500 MB  | 2 924 MB/s | 4 620 MB/s |
+| CPU | pesto | node-yencode |
+|-----|-------|--------------|
+| i5-10400 (Comet Lake, no E-cores) | ~2 200 MB/s | ~2 200 MB/s |
+| i5-14400 (Raptor Lake, hybrid)    | ~2 900 MB/s | ~4 500 MB/s |
 
-node-yencode is a mature native C++ addon with aggressive SIMD tuning.
-pesto's yEnc encoder is competitive but not yet the fastest path — ongoing
-work targets closing this gap (see `ROADMAP.md` Phase 32 future ideas).
+On homogeneous CPUs pesto and node-yencode are neck-and-neck. The gap on
+hybrid CPUs is under investigation — E-cores may favour node-yencode's SIMD
+strategy at line_len=128.
 
 ### PAR2 creation throughput
 
-Benchmarked on Intel Core i5-14400 (16 logical cores), Linux, release build.
 10% recovery, ~1 000 input slices, random data files.
 
-| Input  | parmesan | parpar  | par2cmdline | vs parpar | vs par2cmdline |
-|--------|----------|---------|-------------|-----------|----------------|
-| 1 GB   | 546 MB/s | 650 MB/s | 98 MB/s   | -16%      | +460%          |
-| 5 GB   | 569 MB/s | 606 MB/s | 98 MB/s   | -6%       | +480%          |
-| 10 GB  | 572 MB/s | 587 MB/s | 98 MB/s   | -3%       | +484%          |
+**i5-10400** (Comet Lake, 6c/12t, AVX2, no GFNI):
 
-parmesan closes the gap to parpar as file size grows (single-pass streaming
-amortises startup overhead); both are 5–6× faster than par2cmdline.
+| Input  | parmesan | parpar   | par2cmdline | vs parpar | vs par2cmdline |
+|--------|----------|----------|-------------|-----------|----------------|
+| 1 GB   | 425 MB/s | 493 MB/s | 63 MB/s     | -14%      | +571%          |
+| 5 GB   | 447 MB/s | 433 MB/s | 62 MB/s     | **+3%**   | +623%          |
+| 10 GB  | 426 MB/s | 412 MB/s | 53 MB/s     | **+3%**   | +700%          |
+
+**i5-14400** (Raptor Lake, 6P+4E cores, AVX2+GFNI):
+
+| Input  | parmesan | parpar   | par2cmdline | vs parpar | vs par2cmdline |
+|--------|----------|----------|-------------|-----------|----------------|
+| 1 GB   | 546 MB/s | 650 MB/s | 98 MB/s     | -16%      | +460%          |
+| 5 GB   | 569 MB/s | 606 MB/s | 98 MB/s     | -6%       | +480%          |
+| 10 GB  | 572 MB/s | 587 MB/s | 98 MB/s     | -3%       | +484%          |
+
+parmesan closes the gap to parpar as file size grows and surpasses it at
+≥5 GB on both CPUs. Both are 5–7× faster than par2cmdline.
 
 ### Reproduce on your machine
 
