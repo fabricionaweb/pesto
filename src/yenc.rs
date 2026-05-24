@@ -152,7 +152,8 @@ pub fn encode_part(
     };
 
     let data_encoded_size = encoded_size(data, line_len);
-    let total_capacity = ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
+    let total_capacity =
+        ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
 
     let mut body = Vec::with_capacity(total_capacity);
 
@@ -187,7 +188,7 @@ pub fn encoded_size(data: &[u8], line_len: usize) -> usize {
 
     #[cfg(target_arch = "aarch64")]
     {
-        return unsafe { encoded_size_neon(data, line_len) };
+        unsafe { encoded_size_neon(data, line_len) }
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -267,7 +268,9 @@ unsafe fn encoded_size_neon(data: &[u8], line_len: usize) -> usize {
             let sum = vaddvq_u8(bits) as usize;
             escapes += sum / 8;
 
-            i += 16; col += 16; safe_rem -= 16;
+            i += 16;
+            col += 16;
+            safe_rem -= 16;
         }
 
         while safe_rem > 0 {
@@ -275,7 +278,9 @@ unsafe fn encoded_size_neon(data: &[u8], line_len: usize) -> usize {
             if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
                 escapes += 1;
             }
-            i += 1; col += 1; safe_rem -= 1;
+            i += 1;
+            col += 1;
+            safe_rem -= 1;
         }
     }
 
@@ -893,7 +898,9 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     use std::arch::aarch64::*;
     let line_len = line_len.max(1);
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
     // Reservation is now handled by encode_part, but we keep a local
     // reserve for direct calls.
     out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
@@ -918,13 +925,18 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
             let positional = e == 0x09 || e == 0x20 || e == 0x2E;
             if critical || positional {
-                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
             } else {
-                *out_ptr = e; out_ptr = out_ptr.add(1);
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
             }
             col += 1;
             if col == line_len {
-                *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
+                *out_ptr = b'\r';
+                *out_ptr.add(1) = b'\n';
+                out_ptr = out_ptr.add(2);
                 col = 0;
             }
             i += 1;
@@ -944,10 +956,22 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let s1 = vaddq_u8(chunk1, v_add42);
             let s2 = vaddq_u8(chunk2, v_add42);
             let s3 = vaddq_u8(chunk3, v_add42);
-            let m0 = vorrq_u8(vorrq_u8(vceqq_u8(s0, v_nul), vceqq_u8(s0, v_lf)), vorrq_u8(vceqq_u8(s0, v_cr), vceqq_u8(s0, v_eq)));
-            let m1 = vorrq_u8(vorrq_u8(vceqq_u8(s1, v_nul), vceqq_u8(s1, v_lf)), vorrq_u8(vceqq_u8(s1, v_cr), vceqq_u8(s1, v_eq)));
-            let m2 = vorrq_u8(vorrq_u8(vceqq_u8(s2, v_nul), vceqq_u8(s2, v_lf)), vorrq_u8(vceqq_u8(s2, v_cr), vceqq_u8(s2, v_eq)));
-            let m3 = vorrq_u8(vorrq_u8(vceqq_u8(s3, v_nul), vceqq_u8(s3, v_lf)), vorrq_u8(vceqq_u8(s3, v_cr), vceqq_u8(s3, v_eq)));
+            let m0 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s0, v_nul), vceqq_u8(s0, v_lf)),
+                vorrq_u8(vceqq_u8(s0, v_cr), vceqq_u8(s0, v_eq)),
+            );
+            let m1 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s1, v_nul), vceqq_u8(s1, v_lf)),
+                vorrq_u8(vceqq_u8(s1, v_cr), vceqq_u8(s1, v_eq)),
+            );
+            let m2 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s2, v_nul), vceqq_u8(s2, v_lf)),
+                vorrq_u8(vceqq_u8(s2, v_cr), vceqq_u8(s2, v_eq)),
+            );
+            let m3 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s3, v_nul), vceqq_u8(s3, v_lf)),
+                vorrq_u8(vceqq_u8(s3, v_cr), vceqq_u8(s3, v_eq)),
+            );
 
             if vmaxvq_u8(vorrq_u8(vorrq_u8(m0, m1), vorrq_u8(m2, m3))) == 0 {
                 vst1q_u8(out_ptr, s0);
@@ -955,7 +979,9 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                 vst1q_u8(out_ptr.add(32), s2);
                 vst1q_u8(out_ptr.add(48), s3);
                 out_ptr = out_ptr.add(64);
-                i += 64; col += 64; safe_rem -= 64;
+                i += 64;
+                col += 64;
+                safe_rem -= 64;
             } else {
                 for (chunk_s, chunk_m) in [(s0, m0), (s1, m1), (s2, m2), (s3, m3)] {
                     if vmaxvq_u8(chunk_m) == 0 {
@@ -967,14 +993,27 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         let sum_hi = vaddv_u8(vget_high_u8(weighted)) as usize;
                         let de_lo = vcombine_u8(vget_low_u8(chunk_s), vget_low_u8(v_eq_const));
                         let de_hi = vcombine_u8(vget_high_u8(chunk_s), vget_low_u8(v_eq_const));
-                        let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()));
+                        let res_lo = vaddq_u8(
+                            vqtbl1q_u8(
+                                de_lo,
+                                vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr()),
+                            ),
+                            vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()),
+                        );
                         vst1q_u8(out_ptr, res_lo);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
-                        let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()));
+                        let res_hi = vaddq_u8(
+                            vqtbl1q_u8(
+                                de_hi,
+                                vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr()),
+                            ),
+                            vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()),
+                        );
                         vst1q_u8(out_ptr, res_hi);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_hi) as usize);
                     }
-                    i += 16; col += 16;
+                    i += 16;
+                    col += 16;
                 }
                 safe_rem -= 64;
             }
@@ -998,7 +1037,9 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                 vst1q_u8(out_ptr, s0);
                 vst1q_u8(out_ptr.add(16), s1);
                 out_ptr = out_ptr.add(32);
-                i += 32; col += 32; safe_rem -= 32;
+                i += 32;
+                col += 32;
+                safe_rem -= 32;
             } else {
                 // If any escapes in 32B, handle 16B chunks individually with shuffle expansion
                 for (chunk_s, chunk_m) in [(s0, m0), (s1, m1)] {
@@ -1011,14 +1052,27 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                         let sum_hi = vaddv_u8(vget_high_u8(weighted)) as usize;
                         let de_lo = vcombine_u8(vget_low_u8(chunk_s), vget_low_u8(v_eq_const));
                         let de_hi = vcombine_u8(vget_high_u8(chunk_s), vget_low_u8(v_eq_const));
-                        let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()));
+                        let res_lo = vaddq_u8(
+                            vqtbl1q_u8(
+                                de_lo,
+                                vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr()),
+                            ),
+                            vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()),
+                        );
                         vst1q_u8(out_ptr, res_lo);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
-                        let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()));
+                        let res_hi = vaddq_u8(
+                            vqtbl1q_u8(
+                                de_hi,
+                                vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr()),
+                            ),
+                            vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()),
+                        );
                         vst1q_u8(out_ptr, res_hi);
                         out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_hi) as usize);
                     }
-                    i += 16; col += 16;
+                    i += 16;
+                    col += 16;
                 }
                 safe_rem -= 32;
             }
@@ -1041,24 +1095,43 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                 let sum_high = vaddv_u8(vget_high_u8(weighted)) as usize;
                 let de_lo = vcombine_u8(vget_low_u8(shifted), vget_low_u8(v_eq_const));
                 let de_hi = vcombine_u8(vget_high_u8(shifted), vget_low_u8(v_eq_const));
-                let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_low).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_low).as_ptr()));
+                let res_lo = vaddq_u8(
+                    vqtbl1q_u8(
+                        de_lo,
+                        vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_low).as_ptr()),
+                    ),
+                    vld1q_u8(ADD_TABLE.get_unchecked(sum_low).as_ptr()),
+                );
                 vst1q_u8(out_ptr, res_lo);
                 out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_low) as usize);
-                let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_high).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_high).as_ptr()));
+                let res_hi = vaddq_u8(
+                    vqtbl1q_u8(
+                        de_hi,
+                        vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_high).as_ptr()),
+                    ),
+                    vld1q_u8(ADD_TABLE.get_unchecked(sum_high).as_ptr()),
+                );
                 vst1q_u8(out_ptr, res_hi);
                 out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_high) as usize);
             }
-            i += 16; col += 16; safe_rem -= 16;
+            i += 16;
+            col += 16;
+            safe_rem -= 16;
         }
 
         while safe_rem > 0 {
             let e = data[i].wrapping_add(42);
             if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
-                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
             } else {
-                *out_ptr = e; out_ptr = out_ptr.add(1);
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
             }
-            i += 1; col += 1; safe_rem -= 1;
+            i += 1;
+            col += 1;
+            safe_rem -= 1;
         }
 
         if i < data.len() {
@@ -1068,13 +1141,18 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
             let positional = (e == 0x09 || e == 0x20) && at_line_end;
             if critical || positional {
-                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
             } else {
-                *out_ptr = e; out_ptr = out_ptr.add(1);
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
             }
             col += 1;
             if col == line_len {
-                *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
+                *out_ptr = b'\r';
+                *out_ptr.add(1) = b'\n';
+                out_ptr = out_ptr.add(2);
                 col = 0;
             }
             i += 1;
@@ -1082,7 +1160,9 @@ unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     }
 
     if col != 0 {
-        *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
+        *out_ptr = b'\r';
+        *out_ptr.add(1) = b'\n';
+        out_ptr = out_ptr.add(2);
     }
     out.set_len(out_ptr.offset_from(out_base) as usize);
 }
@@ -2038,7 +2118,9 @@ mod tests {
             let data: Vec<u8> = (0u8..=255)
                 .cycle()
                 .enumerate()
-                .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+                .map(|(i, b): (usize, u8)| {
+                    b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8)
+                })
                 .take(750 * 1024)
                 .collect();
             assert_ssse3_eq!(&data, 128);
@@ -2152,7 +2234,9 @@ mod tests {
             let data: Vec<u8> = (0u8..=255)
                 .cycle()
                 .enumerate()
-                .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+                .map(|(i, b): (usize, u8)| {
+                    b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8)
+                })
                 .take(750 * 1024)
                 .collect();
             assert_avx2_eq!(&data, 128);

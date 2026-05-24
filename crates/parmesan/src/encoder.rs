@@ -534,7 +534,7 @@ impl RecoveryEncoder {
             }
             #[cfg(target_arch = "aarch64")]
             SimdPath::Neon => {
-                self.flush_neon();
+                unsafe { self.flush_neon_clmul() };
                 return;
             }
             _ => {} // specified path not supported/available; fall through to auto
