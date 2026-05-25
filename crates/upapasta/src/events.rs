@@ -3,7 +3,12 @@
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-/// Which phase of the pipeline is currently active.
+/// High-level phase of the pipeline.
+///
+/// PAR2 encoding and NNTP posting run concurrently inside pesto; the phase
+/// only switches to distinct states for the sequential steps (compress,
+/// write par2 volumes, verify). During `Uploading`, PAR2 progress is tracked
+/// separately in `UploadProgress::par2_{done,total}_slices`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum UploadPhase {
     #[default]
@@ -12,15 +17,13 @@ pub enum UploadPhase {
         done_bytes: u64,
         total_bytes: u64,
     },
-    GeneratingPar2 {
-        done_slices: usize,
-        total_slices: usize,
-    },
+    /// NNTP posting (+ concurrent PAR2 encoding). Main phase.
+    Uploading,
+    /// Writing computed PAR2 recovery volumes to disk (sequential, brief).
     WritingPar2 {
         written: u32,
         total: u32,
     },
-    Uploading,
     Verifying {
         checked: u64,
         total: u64,
@@ -43,6 +46,9 @@ pub struct ProgressUpdate {
 
     /// Current pipeline phase (None = no change from previous)
     pub phase: Option<UploadPhase>,
+
+    /// PAR2 encoding progress (concurrent with NNTP posting); None = no change
+    pub par2_slices: Option<(usize, usize)>, // (done, total)
 }
 
 #[derive(Debug, Clone)]

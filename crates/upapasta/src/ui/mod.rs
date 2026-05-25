@@ -427,93 +427,82 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // ── Phase indicator ──────────────────────────────────────────────────────
-    let phases = [
-        (
-            "Compress",
-            matches!(p.phase, UploadPhase::Compressing { .. }),
-        ),
-        (
-            "PAR2 Gen",
-            matches!(
-                p.phase,
-                UploadPhase::GeneratingPar2 { .. } | UploadPhase::WritingPar2 { .. }
-            ),
-        ),
-        ("Upload", matches!(p.phase, UploadPhase::Uploading)),
-        ("Verify", matches!(p.phase, UploadPhase::Verifying { .. })),
-    ];
-    let phase_line: Vec<Span> = {
+    // ── Status line: phase + concurrent PAR2 info ───────────────────────────
+    let status_line: Vec<Span> = {
         let mut spans = vec![Span::raw("  ")];
-        for (i, (label, active)) in phases.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
-            }
-            if *active {
-                spans.push(Span::styled(
-                    format!("[{}]", label),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    label.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-        }
-        // Phase-specific detail
-        let detail = match &p.phase {
+        match &p.phase {
             UploadPhase::Compressing {
                 done_bytes,
                 total_bytes,
             } if *total_bytes > 0 => {
                 let pct = (*done_bytes as f64 / *total_bytes as f64 * 100.0) as u8;
-                format!("  ({pct}%)")
-            }
-            UploadPhase::GeneratingPar2 {
-                done_slices,
-                total_slices,
-            } if *total_slices > 0 => {
-                let pct = (*done_slices as f64 / *total_slices as f64 * 100.0) as u8;
-                format!("  ({done_slices}/{total_slices} slices, {pct}%)")
+                spans.push(Span::styled(
+                    format!(
+                        "[Compress]  {pct}%  {}/{}",
+                        pesto::progress::format_size(*done_bytes),
+                        pesto::progress::format_size(*total_bytes)
+                    ),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             UploadPhase::WritingPar2 { written, total } if *total > 0 => {
-                format!("  (writing {written}/{total})")
+                let pct = (*written as f64 / *total as f64 * 100.0) as u8;
+                spans.push(Span::styled(
+                    format!("[Writing PAR2 volumes]  {pct}%  {written}/{total}"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             UploadPhase::Verifying { checked, total } if *total > 0 => {
                 let pct = (*checked as f64 / *total as f64 * 100.0) as u8;
-                format!("  ({checked}/{total} articles, {pct}%)")
+                spans.push(Span::styled(
+                    format!("[Verify]  {pct}%  {checked}/{total} articles"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
-            _ => String::new(),
-        };
-        if !detail.is_empty() {
-            spans.push(Span::styled(detail, Style::default().fg(Color::Cyan)));
+            _ => {
+                // Uploading (main phase) — show upload speed + concurrent PAR2
+                let speed = if p.last_speed > 0.1 {
+                    format!("{:.1} MB/s", p.last_speed)
+                } else {
+                    "connecting...".to_string()
+                };
+                spans.push(Span::styled(
+                    "[Upload] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(speed));
+
+                // Show PAR2 concurrent progress if active
+                if p.par2_total_slices > 0 {
+                    let par2_pct =
+                        (p.par2_done_slices as f64 / p.par2_total_slices as f64 * 100.0) as usize;
+                    spans.push(Span::styled(
+                        format!(
+                            "   PAR2 (concurrent): {par2_pct}%  {}/{} slices",
+                            p.par2_done_slices, p.par2_total_slices
+                        ),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+            }
         }
         spans
     };
-    f.render_widget(Paragraph::new(Line::from(phase_line)), chunks[0]);
+    f.render_widget(Paragraph::new(Line::from(status_line)), chunks[0]);
 
     // ── Main upload gauge ────────────────────────────────────────────────────
-    // During PAR2/compress phases, show phase progress instead of upload bytes
     let (pct, label) = match &p.phase {
-        UploadPhase::GeneratingPar2 {
-            done_slices,
-            total_slices,
-        } if *total_slices > 0 => {
-            let phase_pct = (*done_slices as f64 / *total_slices as f64 * 100.0) as u16;
-            let lbl = format!(
-                "PAR2  {:.1}%  {}/{} slices",
-                *done_slices as f64 / *total_slices as f64 * 100.0,
-                done_slices,
-                total_slices,
-            );
-            (phase_pct, lbl)
-        }
         UploadPhase::WritingPar2 { written, total } if *total > 0 => {
             let phase_pct = (*written as f64 / *total as f64 * 100.0) as u16;
-            let lbl = format!("PAR2 write  {:.1}%  {}/{}", phase_pct, written, total);
+            let lbl = format!("Writing PAR2  {:.1}%  {}/{}", phase_pct, written, total);
             (phase_pct, lbl)
         }
         UploadPhase::Compressing {
@@ -535,7 +524,7 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
             (phase_pct, lbl)
         }
         _ => {
-            // Uploading or Preparing: show segment/byte progress
+            // Uploading or Preparing: upload bytes/speed/ETA
             let upload_pct = p.progress_pct() as u16;
             let speed = if p.last_speed > 0.1 {
                 format!("{:.1} MB/s", p.last_speed)

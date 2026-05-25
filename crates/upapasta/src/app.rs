@@ -36,6 +36,10 @@ pub struct UploadProgress {
 
     /// Current pipeline phase
     pub phase: UploadPhase,
+
+    /// PAR2 encoding progress (runs concurrently with NNTP posting)
+    pub par2_done_slices: usize,
+    pub par2_total_slices: usize,
 }
 
 /// Progress of a single file during an active upload.
@@ -117,6 +121,12 @@ impl UploadProgress {
         }
         if let Some(ref phase) = update.phase {
             self.phase = phase.clone();
+        }
+        if let Some((done, total)) = update.par2_slices {
+            self.par2_done_slices = done;
+            if total > 0 {
+                self.par2_total_slices = total;
+            }
         }
     }
 }
