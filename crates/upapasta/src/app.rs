@@ -1,5 +1,6 @@
 use crate::catalog::{Catalog, CatalogStats, NewUpload, UploadSummary};
-use crate::events::ProgressUpdate;
+use crate::events::{ProgressUpdate, UploadPhase};
+use crate::nzb_viewer::NzbViewerState;
 use crate::ui::components::{FileTree, LogPanel, StatusBar, UploadQueue};
 use pesto::config::{self, Config as PestoConfig, FileConfig, ObfuscateMode};
 use std::path::PathBuf;
@@ -32,6 +33,9 @@ pub struct UploadProgress {
 
     /// Per-file progress (populated when upload starts)
     pub files: Vec<FileProgress>,
+
+    /// Current pipeline phase
+    pub phase: UploadPhase,
 }
 
 /// Progress of a single file during an active upload.
@@ -111,8 +115,8 @@ impl UploadProgress {
             self.last_speed = update.current_speed_mbps;
             self.push_speed_sample(update.current_speed_mbps);
         }
-        if let Some(_msg) = &update.message {
-            // message already logged via handle_progress if needed
+        if let Some(ref phase) = update.phase {
+            self.phase = phase.clone();
         }
     }
 }
@@ -143,6 +147,12 @@ pub struct App {
 
     /// Upload start time (to compute duration for the catalog record)
     pub upload_started_at: Option<std::time::Instant>,
+
+    /// Config screen state + per-session overrides
+    pub config_state: ConfigState,
+
+    /// When true, draw the upload confirmation modal overlay
+    pub show_upload_confirm: bool,
 }
 
 /// State for the History screen.
@@ -160,6 +170,38 @@ pub struct HistoryState {
     pub stats: Option<CatalogStats>,
     /// Whether stats panel is expanded
     pub show_stats: bool,
+    /// NZB archive viewer overlay (Some when open)
+    pub nzb_viewer: Option<NzbViewerState>,
+}
+
+/// Per-session upload overrides set via the Config screen.
+/// None = use the value from the loaded pesto config (or built-in default).
+#[derive(Debug, Default, Clone)]
+pub struct SessionOverrides {
+    pub from: Option<String>,
+    /// Comma-separated newsgroup list.
+    pub groups: Option<String>,
+    pub obfuscate: Option<ObfuscateMode>,
+    /// 0–50 %
+    pub par2: Option<u8>,
+    pub article_size_kb: Option<usize>,
+    pub verify: Option<bool>,
+    pub nzb_password: Option<String>,
+    pub nzb_category: Option<String>,
+    pub compress_password: Option<String>,
+}
+
+/// State for the Config screen.
+#[derive(Debug, Default)]
+pub struct ConfigState {
+    /// Index of the selected field in the field list.
+    pub selected: usize,
+    /// Whether we are currently editing the selected field.
+    pub editing: bool,
+    /// Scratch buffer for text input.
+    pub edit_buf: String,
+    /// Per-session overrides the user has set.
+    pub overrides: SessionOverrides,
 }
 
 impl App {
@@ -210,6 +252,8 @@ impl App {
             catalog,
             history: HistoryState::default(),
             upload_started_at: None,
+            config_state: ConfigState::default(),
+            show_upload_confirm: false,
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
@@ -572,6 +616,238 @@ impl App {
 
     pub fn history_select_prev(&mut self) {
         self.history.selected = self.history.selected.saturating_sub(1);
+    }
+
+    /// Open the NZB viewer for the currently selected history record.
+    pub fn open_nzb_viewer(&mut self) {
+        let Some(r) = self.history.rows.get(self.history.selected) else {
+            return;
+        };
+        let path = match r.nzb_path.clone() {
+            Some(p) => p,
+            None => {
+                self.status_bar.set("No NZB file for this record");
+                return;
+            }
+        };
+        match crate::nzb_viewer::parse_nzb(&path) {
+            Ok(contents) => {
+                self.history.nzb_viewer = Some(NzbViewerState {
+                    contents,
+                    scroll: 0,
+                });
+            }
+            Err(e) => {
+                self.status_bar.set(format!("NZB parse error: {}", e));
+                self.log_panel
+                    .push(format!("NZB parse error ({}): {}", path, e));
+            }
+        }
+    }
+
+    pub fn close_nzb_viewer(&mut self) {
+        self.history.nzb_viewer = None;
+    }
+
+    pub fn nzb_viewer_scroll_down(&mut self) {
+        if let Some(ref mut v) = self.history.nzb_viewer {
+            let max = v.contents.files.len().saturating_sub(1);
+            v.scroll = (v.scroll + 1).min(max);
+        }
+    }
+
+    pub fn nzb_viewer_scroll_up(&mut self) {
+        if let Some(ref mut v) = self.history.nzb_viewer {
+            v.scroll = v.scroll.saturating_sub(1);
+        }
+    }
+
+    // ── Config screen helpers ─────────────────────────────────────────────
+
+    /// Total number of editable fields in the Config screen.
+    pub const CONFIG_FIELD_COUNT: usize = 9;
+
+    pub fn config_select_next(&mut self) {
+        self.config_state.selected =
+            (self.config_state.selected + 1).min(Self::CONFIG_FIELD_COUNT - 1);
+    }
+
+    pub fn config_select_prev(&mut self) {
+        self.config_state.selected = self.config_state.selected.saturating_sub(1);
+    }
+
+    /// Enter edit mode for the currently selected field.
+    pub fn config_start_edit(&mut self) {
+        let ov = &self.config_state.overrides;
+        let cfg = self.pesto_config.as_ref();
+        let buf = match self.config_state.selected {
+            0 => ov
+                .from
+                .clone()
+                .or_else(|| cfg.map(|c| c.from.clone()))
+                .unwrap_or_default(),
+            1 => ov
+                .groups
+                .clone()
+                .or_else(|| cfg.map(|c| c.groups.join(",")))
+                .unwrap_or_default(),
+            2 => {
+                // obfuscate: cycle on confirm, no text buf needed
+                self.config_cycle_obfuscate();
+                return;
+            }
+            3 => ov
+                .par2
+                .map(|v| v.to_string())
+                .or_else(|| cfg.map(|c| c.par2.to_string()))
+                .unwrap_or_else(|| "10".to_string()),
+            4 => ov
+                .article_size_kb
+                .map(|v| v.to_string())
+                .or_else(|| cfg.map(|c| (c.article_size / 1024).to_string()))
+                .unwrap_or_else(|| "750".to_string()),
+            5 => {
+                // verify: cycle bool
+                self.config_cycle_verify();
+                return;
+            }
+            6 => ov
+                .nzb_password
+                .clone()
+                .or_else(|| cfg.and_then(|c| c.nzb_password.clone()))
+                .unwrap_or_default(),
+            7 => ov
+                .nzb_category
+                .clone()
+                .or_else(|| cfg.and_then(|c| c.nzb_category.clone()))
+                .unwrap_or_default(),
+            8 => ov
+                .compress_password
+                .clone()
+                .or_else(|| cfg.and_then(|c| c.compress_password.clone()))
+                .unwrap_or_default(),
+            _ => return,
+        };
+        self.config_state.edit_buf = buf;
+        self.config_state.editing = true;
+    }
+
+    /// Commit the edit buffer to the current field override.
+    pub fn config_confirm_edit(&mut self) {
+        let buf = self.config_state.edit_buf.trim().to_string();
+        let ov = &mut self.config_state.overrides;
+        match self.config_state.selected {
+            0 => ov.from = if buf.is_empty() { None } else { Some(buf) },
+            1 => ov.groups = if buf.is_empty() { None } else { Some(buf) },
+            3 => {
+                ov.par2 = buf.parse::<u8>().ok().map(|v| v.min(50));
+            }
+            4 => {
+                ov.article_size_kb = buf.parse::<usize>().ok();
+            }
+            6 => ov.nzb_password = if buf.is_empty() { None } else { Some(buf) },
+            7 => ov.nzb_category = if buf.is_empty() { None } else { Some(buf) },
+            8 => ov.compress_password = if buf.is_empty() { None } else { Some(buf) },
+            _ => {}
+        }
+        self.config_state.editing = false;
+        self.config_state.edit_buf.clear();
+        self.status_bar.set("Override saved (session only)");
+    }
+
+    pub fn config_cancel_edit(&mut self) {
+        self.config_state.editing = false;
+        self.config_state.edit_buf.clear();
+    }
+
+    /// Reset the selected field override to None (use config default).
+    pub fn config_reset_field(&mut self) {
+        let ov = &mut self.config_state.overrides;
+        match self.config_state.selected {
+            0 => ov.from = None,
+            1 => ov.groups = None,
+            2 => ov.obfuscate = None,
+            3 => ov.par2 = None,
+            4 => ov.article_size_kb = None,
+            5 => ov.verify = None,
+            6 => ov.nzb_password = None,
+            7 => ov.nzb_category = None,
+            8 => ov.compress_password = None,
+            _ => {}
+        }
+        self.status_bar.set("Field reset to config default");
+    }
+
+    /// Reset all overrides.
+    pub fn config_reset_all(&mut self) {
+        self.config_state.overrides = SessionOverrides::default();
+        self.status_bar.set("All overrides cleared");
+    }
+
+    fn config_cycle_obfuscate(&mut self) {
+        use ObfuscateMode::*;
+        let cfg_default = self
+            .pesto_config
+            .as_ref()
+            .map(|c| c.obfuscate)
+            .unwrap_or(ObfuscateMode::None);
+        let current = self.config_state.overrides.obfuscate.unwrap_or(cfg_default);
+        self.config_state.overrides.obfuscate = Some(match current {
+            None => Subject,
+            Subject => Full,
+            Full => None,
+        });
+        self.status_bar.set("Obfuscate mode changed");
+    }
+
+    fn config_cycle_verify(&mut self) {
+        let cfg_default = self
+            .pesto_config
+            .as_ref()
+            .map(|c| c.verify)
+            .unwrap_or(false);
+        let current = self.config_state.overrides.verify.unwrap_or(cfg_default);
+        self.config_state.overrides.verify = Some(!current);
+        self.status_bar.set("Verify mode toggled");
+    }
+
+    /// Apply session overrides on top of the effective config, returning a
+    /// modified clone ready for upload.
+    pub fn effective_config_with_overrides(&self) -> Option<PestoConfig> {
+        let mut cfg = self.pesto_config.clone()?;
+        let ov = &self.config_state.overrides;
+        if let Some(ref from) = ov.from {
+            cfg.from = from.clone();
+        }
+        if let Some(ref groups_str) = ov.groups {
+            cfg.groups = groups_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(obf) = ov.obfuscate {
+            cfg.obfuscate = obf;
+        }
+        if let Some(par2) = ov.par2 {
+            cfg.par2 = par2;
+        }
+        if let Some(kb) = ov.article_size_kb {
+            cfg.article_size = kb * 1024;
+        }
+        if let Some(verify) = ov.verify {
+            cfg.verify = verify;
+        }
+        if let Some(ref pw) = ov.nzb_password {
+            cfg.nzb_password = Some(pw.clone());
+        }
+        if let Some(ref cat) = ov.nzb_category {
+            cfg.nzb_category = Some(cat.clone());
+        }
+        if let Some(ref pw) = ov.compress_password {
+            cfg.compress_password = Some(pw.clone());
+        }
+        Some(cfg)
     }
 }
 

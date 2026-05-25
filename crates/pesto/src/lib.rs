@@ -54,3 +54,20 @@ pub async fn post(
     let outcome = poster::post_files_with_progress(&config, &files, Some(tx), None).await?;
     Ok((outcome, rx))
 }
+
+/// Like [`post`] but accepts an external cancel flag.
+///
+/// Set `cancel` to `true` at any point to abort the upload at the next segment
+/// boundary. The outcome returned reflects the partial run (cancelled flag is
+/// available on [`poster::PostOutcome`]).
+pub async fn post_cancelable(
+    config: config::Config,
+    files: Vec<walk::InputFile>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<(poster::PostOutcome, progress::ProgressReceiver)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome =
+        poster::post_files_with_progress_and_cancel(&config, &files, Some(tx), None, Some(cancel))
+            .await?;
+    Ok((outcome, rx))
+}

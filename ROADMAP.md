@@ -358,7 +358,7 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Move existing `pesto` code into `crates/pesto/`
 - [x] Create `crates/upapasta` with initial TUI skeleton (`ratatui` + `crossterm`)
 - [x] Update `CLAUDE.md` with new architecture and development practices
-- [ ] Refine public API in `pesto` (make `pesto::post()` more ergonomic for TUI use)
+- [x] Refine public API in `pesto`: `post_cancelable(config, files, Arc<AtomicBool>)` — cancellation properly propagates into pesto workers instead of only watching Ctrl-C
 
 ### 40b — TUI Core (In Progress)
 
@@ -373,12 +373,19 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Live visual progress: accurate segment/byte tracking + speed + ETA from structured ProgressUpdate
 - [x] Throughput sparkline (ratatui Sparkline widget) showing recent speed history
 - [x] Per-file Gauge progress bars (color-coded by status: pending/active/done/failed)
-- [x] Upload controls: cancel current upload (`x` key) using `CancellationToken`
+- [x] Upload controls: cancel current upload (`x` key) using `CancellationToken` — now fully propagated to pesto workers
 - [x] Pause/resume upload (`p` key) - UI + stats freeze (full worker pause pending pesto API)
 - [x] Queue management: remove items (`d`/Del), clear queue (`c`), reordering (Shift+J/K)
 - [x] Graceful error display: ERROR/WARN lines in red/yellow, UploadError event to status bar
 - [x] Responsive layout: compact mode < 20 lines, "too small" guard < 40×10
+- [x] **Bulk multi-select in Browser**: Space marks/unmarks items with `[x]`/`[ ]` checkboxes; cursor advances; count shown in title and status bar
+- [x] **Browser split layout**: queue panel sidebar (35%) appears alongside file tree when queue is non-empty
+- [x] **Upload confirmation modal**: `u` opens overlay with files + effective settings (server, groups, from, PAR2, obfuscate, compress, verify); Enter/y confirms, Esc/n cancels
+- [x] **Pipeline phase indicator**: progress section shows `Compress → PAR2 Gen → Upload → Verify` tracker with per-phase detail driven by real pesto ProgressEvents
 - [ ] Theme support (dark/light + user-configurable colors)
+- [ ] Directory-level queuing: Space on a directory marks all files inside recursively
+- [ ] Auto-switch to Dashboard when upload starts so user sees progress without pressing Tab
+- [ ] Pause support: real worker suspension (requires pesto API — currently only freezes UI stats)
 
 ### 40c — Catalog & Persistence
 
@@ -386,7 +393,7 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Import history from legacy Python JSONL (auto-import on first run, 3914 records)
 - [x] Search, filtering and statistics views (History tab: `/` to filter, `s` for stats panel)
 - [x] Record each upload to catalog on completion (name, size, duration, group, server, category)
-- [ ] NZB archive viewer
+- [x] NZB archive viewer (Enter on History item → overlay popup with file list, segments, bytes; Esc to close)
 
 ### 40d — Orchestration & Feature Parity
 
@@ -394,8 +401,8 @@ Concepts to evaluate later. Not committed to any timeline.
 - [ ] Metadata enrichment (TMDb, improved NFO generation)
 - [x] Basic real config loading on startup (from default pesto path)
 - [x] Clear visibility of effective upload settings before upload: obfuscation mode, compression+password, PAR2 %, groups, From, article size, verify — shown in Dashboard when queue has files + logged on upload start
-- [ ] Full configuration UI / editing + profile support (override obfuscation, PAR2, compression etc. from TUI)
-- [ ] Post-upload hooks (shell + native Rust)
+- [x] Full configuration UI / editing + profile support (override obfuscation, PAR2, compression etc. from TUI — Config tab with per-session overrides for from, groups, obfuscate, PAR2, article size, verify, passwords; applied at upload time)
+- [x] Post-upload hooks (shell + native Rust) — runs config.post_hook via sh -c + executables in ~/.config/pesto/hooks/; same PESTO_* env vars as pesto CLI; output streamed to log panel
 - [ ] Wizard for first-time setup
 
 ### 40e — Polish, Testing & Release
