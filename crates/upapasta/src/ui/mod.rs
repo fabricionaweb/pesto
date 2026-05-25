@@ -256,40 +256,84 @@ fn draw_upload_confirm_modal(f: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  Settings:",
+        "  Settings:  (j/k: nav  ←/→ Space: edit)",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
 
-    let setting_style = Style::default().fg(Color::White);
     let key_style = Style::default().fg(Color::DarkGray);
     let val_style = Style::default().fg(Color::Yellow);
+    let sel_key_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let sel_val_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let edit_hint_style = Style::default().fg(Color::DarkGray);
 
-    let settings = [
+    // Read-only settings (no cursor)
+    let readonly = [
         (
-            "  Server     ",
+            "  Server   ",
             app.pesto_config
                 .as_ref()
                 .map(|c| format!("{}:{}", c.host, c.port))
                 .unwrap_or_else(|| "dry-run".to_string()),
         ),
-        ("  Groups     ", s.groups.clone()),
-        ("  From       ", s.from.clone()),
-        ("  PAR2       ", s.par2.clone()),
-        ("  Obfuscate  ", s.obfuscate.clone()),
-        ("  Compress   ", s.compression.clone()),
-        ("  Verify     ", s.verify.clone()),
+        ("  Groups   ", s.groups.clone()),
+        ("  From     ", s.from.clone()),
+        ("  Compress ", s.compression.clone()),
     ];
-    for (key, val) in &settings {
+    for (key, val) in &readonly {
         lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
             Span::styled(key.to_string(), key_style),
             Span::styled(": ", key_style),
             Span::styled(val.clone(), val_style),
         ]));
     }
 
-    let _ = setting_style;
+    // Editable settings with cursor indicator
+    // field 0 = obfuscate, 1 = par2, 2 = verify
+    let editable = [
+        ("  Obfuscate", s.obfuscate.clone(), 0usize),
+        ("  PAR2     ", s.par2.clone(), 1usize),
+        ("  Verify   ", s.verify.clone(), 2usize),
+    ];
+    for (key, val, field_idx) in &editable {
+        let is_selected = app.confirm_field == *field_idx;
+        let cursor = if is_selected { "▶ " } else { "  " };
+        let hint = if is_selected { "  ←/→ Space" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(cursor, Style::default().fg(Color::Green)),
+            Span::styled(
+                key.to_string(),
+                if is_selected {
+                    sel_key_style
+                } else {
+                    key_style
+                },
+            ),
+            Span::styled(
+                ": ",
+                if is_selected {
+                    sel_key_style
+                } else {
+                    key_style
+                },
+            ),
+            Span::styled(
+                val.clone(),
+                if is_selected {
+                    sel_val_style
+                } else {
+                    val_style
+                },
+            ),
+            Span::styled(hint.to_string(), edit_hint_style),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(
