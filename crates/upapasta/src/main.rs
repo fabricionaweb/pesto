@@ -94,7 +94,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                         if !app.log_panel.searching
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
-                            && !app.config_state.editing =>
+                            && !app.config_state.editing
+                            && !app.show_upload_confirm =>
                     {
                         return Ok(())
                     }
@@ -102,7 +103,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                         if !app.log_panel.searching
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
-                            && !app.config_state.editing =>
+                            && !app.config_state.editing
+                            && !app.show_upload_confirm =>
                     {
                         return Ok(())
                     }
@@ -124,9 +126,18 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.show_upload_confirm = false;
                             handle_upload_trigger(app, tx.clone());
                         }
-                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                        KeyCode::Esc | KeyCode::Char('n') => {
                             app.show_upload_confirm = false;
                             app.status_bar.set("Upload cancelled");
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => app.confirm_field_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.confirm_field_prev(),
+                        // Cycle/toggle selected field
+                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                            app.confirm_field_toggle();
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            app.confirm_field_decrement();
                         }
                         _ => {}
                     },

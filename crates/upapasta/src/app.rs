@@ -153,6 +153,8 @@ pub struct App {
 
     /// When true, draw the upload confirmation modal overlay
     pub show_upload_confirm: bool,
+    /// Selected field index inside the confirm modal (for inline editing)
+    pub confirm_field: usize,
 }
 
 /// State for the History screen.
@@ -254,6 +256,7 @@ impl App {
             upload_started_at: None,
             config_state: ConfigState::default(),
             show_upload_confirm: false,
+            confirm_field: 0,
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
@@ -510,7 +513,15 @@ impl App {
     /// Returns a user-friendly summary of the settings that will be used
     /// for the next upload (based on loaded config or dry-run defaults).
     pub fn effective_upload_settings(&self) -> UploadSettingsSummary {
-        if let Some(cfg) = &self.pesto_config {
+        // Use effective config (with session overrides applied) when available.
+        let owned;
+        let cfg_ref: Option<&PestoConfig> = if self.pesto_config.is_some() {
+            owned = self.effective_config_with_overrides();
+            owned.as_ref()
+        } else {
+            None
+        };
+        if let Some(cfg) = cfg_ref {
             let obfuscate = match cfg.obfuscate {
                 ObfuscateMode::None => "None (real filenames)",
                 ObfuscateMode::Subject => "Subject only",
@@ -848,6 +859,84 @@ impl App {
             cfg.compress_password = Some(pw.clone());
         }
         Some(cfg)
+    }
+
+    // ── Confirm modal field editing ───────────────────────────────────────────
+
+    /// Number of editable fields in the confirm modal.
+    pub const CONFIRM_FIELDS: usize = 3;
+
+    /// Move selection down (wraps).
+    pub fn confirm_field_next(&mut self) {
+        self.confirm_field = (self.confirm_field + 1) % Self::CONFIRM_FIELDS;
+    }
+
+    /// Move selection up (wraps).
+    pub fn confirm_field_prev(&mut self) {
+        self.confirm_field = if self.confirm_field == 0 {
+            Self::CONFIRM_FIELDS - 1
+        } else {
+            self.confirm_field - 1
+        };
+    }
+
+    /// Toggle / cycle the currently selected confirm-modal field.
+    pub fn confirm_field_toggle(&mut self) {
+        match self.confirm_field {
+            // 0 — Obfuscate: cycle None → Subject → Full → None
+            0 => {
+                let current = self.config_state.overrides.obfuscate.unwrap_or(
+                    self.pesto_config
+                        .as_ref()
+                        .map(|c| c.obfuscate)
+                        .unwrap_or(ObfuscateMode::None),
+                );
+                let next = match current {
+                    ObfuscateMode::None => ObfuscateMode::Subject,
+                    ObfuscateMode::Subject => ObfuscateMode::Full,
+                    ObfuscateMode::Full => ObfuscateMode::None,
+                };
+                self.config_state.overrides.obfuscate = Some(next);
+            }
+            // 1 — PAR2 %: step +5, wrap 0→50
+            1 => {
+                let current = self
+                    .config_state
+                    .overrides
+                    .par2
+                    .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
+                let next = if current >= 50 { 0 } else { current + 5 };
+                self.config_state.overrides.par2 = Some(next);
+            }
+            // 2 — Verify: toggle
+            2 => {
+                let current = self.config_state.overrides.verify.unwrap_or(
+                    self.pesto_config
+                        .as_ref()
+                        .map(|c| c.verify)
+                        .unwrap_or(false),
+                );
+                self.config_state.overrides.verify = Some(!current);
+            }
+            _ => {}
+        }
+    }
+
+    /// Decrement the currently selected field (PAR2 only; other fields cycle on toggle).
+    pub fn confirm_field_decrement(&mut self) {
+        if self.confirm_field == 1 {
+            let current = self
+                .config_state
+                .overrides
+                .par2
+                .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
+            let next = if current == 0 {
+                50
+            } else {
+                current.saturating_sub(5)
+            };
+            self.config_state.overrides.par2 = Some(next);
+        }
     }
 }
 
