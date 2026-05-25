@@ -120,26 +120,40 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.refresh_history();
                         }
                     }
-                    // ── Upload confirm modal (any state) ──────────────────
+                    // ── Upload config panel (text-edit mode takes priority) ──
+                    _ if app.show_upload_confirm && app.confirm_editing => match key.code {
+                        KeyCode::Esc => app.confirm_cancel_edit(),
+                        KeyCode::Enter => app.confirm_confirm_edit(),
+                        KeyCode::Backspace => {
+                            app.confirm_edit_buf.pop();
+                        }
+                        KeyCode::Tab => app.confirm_toggle_password_reveal(),
+                        KeyCode::Char(c) => app.confirm_edit_buf.push(c),
+                        _ => {}
+                    },
+                    // ── Upload config panel (navigation mode) ─────────────
                     _ if app.show_upload_confirm => match key.code {
-                        KeyCode::Enter | KeyCode::Char('y') => {
-                            app.show_upload_confirm = false;
+                        // y or Ctrl+Enter = start upload
+                        KeyCode::Char('y') => {
+                            app.confirm_close();
                             app.state = app::AppState::Dashboard;
                             handle_upload_trigger(app, tx.clone());
                         }
+                        // Esc/n = cancel panel (stay in browser)
                         KeyCode::Esc | KeyCode::Char('n') => {
-                            app.show_upload_confirm = false;
+                            app.confirm_close();
                             app.status_bar.set("Upload cancelled");
                         }
                         KeyCode::Down | KeyCode::Char('j') => app.confirm_field_next(),
                         KeyCode::Up | KeyCode::Char('k') => app.confirm_field_prev(),
-                        // Cycle/toggle selected field
+                        // Enter or e: cycle enum/bool, or enter edit mode for text fields
+                        KeyCode::Enter | KeyCode::Char('e') => app.confirm_field_activate(),
+                        // Right/l/Space: increment cycle fields
                         KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                            app.confirm_field_toggle();
+                            app.confirm_field_increment();
                         }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            app.confirm_field_decrement();
-                        }
+                        // Left/h: decrement (PAR2 only)
+                        KeyCode::Left | KeyCode::Char('h') => app.confirm_field_decrement(),
                         _ => {}
                     },
                     KeyCode::Char('h') if app.state == app::AppState::Browser => {

@@ -161,10 +161,16 @@ pub struct App {
     /// Config screen state + per-session overrides
     pub config_state: ConfigState,
 
-    /// When true, draw the upload confirmation modal overlay
+    /// When true, draw the upload config panel (replaces NZB detail in browser)
     pub show_upload_confirm: bool,
-    /// Selected field index inside the confirm modal (for inline editing)
+    /// Selected field index inside the config panel
     pub confirm_field: usize,
+    /// True when the selected config-panel field is in text-edit mode
+    pub confirm_editing: bool,
+    /// Scratch buffer for text fields inside the config panel
+    pub confirm_edit_buf: String,
+    /// Toggle to reveal the password field value
+    pub confirm_show_password: bool,
 }
 
 /// State for the History screen.
@@ -267,6 +273,9 @@ impl App {
             config_state: ConfigState::default(),
             show_upload_confirm: false,
             confirm_field: 0,
+            confirm_editing: false,
+            confirm_edit_buf: String::new(),
+            confirm_show_password: false,
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
@@ -903,17 +912,16 @@ impl App {
         Some(cfg)
     }
 
-    // ── Confirm modal field editing ───────────────────────────────────────────
+    // ── Upload config panel field editing ─────────────────────────────────────
 
-    /// Number of editable fields in the confirm modal.
-    pub const CONFIRM_FIELDS: usize = 3;
+    /// Number of editable fields in the upload config panel.
+    /// 0=Obfuscate  1=PAR2%  2=Verify  3=Password  4=Groups
+    pub const CONFIRM_FIELDS: usize = 5;
 
-    /// Move selection down (wraps).
     pub fn confirm_field_next(&mut self) {
         self.confirm_field = (self.confirm_field + 1) % Self::CONFIRM_FIELDS;
     }
 
-    /// Move selection up (wraps).
     pub fn confirm_field_prev(&mut self) {
         self.confirm_field = if self.confirm_field == 0 {
             Self::CONFIRM_FIELDS - 1
@@ -922,36 +930,35 @@ impl App {
         };
     }
 
-    /// Toggle / cycle the currently selected confirm-modal field.
-    pub fn confirm_field_toggle(&mut self) {
+    /// Cycle / toggle enum and bool fields. For text fields (3, 4), enter edit mode.
+    pub fn confirm_field_activate(&mut self) {
         match self.confirm_field {
-            // 0 — Obfuscate: cycle None → Subject → Full → None
             0 => {
+                // Obfuscate: cycle None → Subject → Full → None
                 let current = self.config_state.overrides.obfuscate.unwrap_or(
                     self.pesto_config
                         .as_ref()
                         .map(|c| c.obfuscate)
                         .unwrap_or(ObfuscateMode::None),
                 );
-                let next = match current {
+                self.config_state.overrides.obfuscate = Some(match current {
                     ObfuscateMode::None => ObfuscateMode::Subject,
                     ObfuscateMode::Subject => ObfuscateMode::Full,
                     ObfuscateMode::Full => ObfuscateMode::None,
-                };
-                self.config_state.overrides.obfuscate = Some(next);
+                });
             }
-            // 1 — PAR2 %: step +5, wrap 0→50
             1 => {
+                // PAR2 %: enter text-edit mode
                 let current = self
                     .config_state
                     .overrides
                     .par2
                     .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
-                let next = if current >= 50 { 0 } else { current + 5 };
-                self.config_state.overrides.par2 = Some(next);
+                self.confirm_edit_buf = current.to_string();
+                self.confirm_editing = true;
             }
-            // 2 — Verify: toggle
             2 => {
+                // Verify: toggle
                 let current = self.config_state.overrides.verify.unwrap_or(
                     self.pesto_config
                         .as_ref()
@@ -960,11 +967,49 @@ impl App {
                 );
                 self.config_state.overrides.verify = Some(!current);
             }
+            3 => {
+                // NZB Password: enter text-edit mode
+                let current = self
+                    .config_state
+                    .overrides
+                    .nzb_password
+                    .clone()
+                    .or_else(|| {
+                        self.pesto_config
+                            .as_ref()
+                            .and_then(|c| c.nzb_password.clone())
+                    })
+                    .unwrap_or_default();
+                self.confirm_edit_buf = current;
+                self.confirm_editing = true;
+            }
+            4 => {
+                // Groups: enter text-edit mode
+                let current = self
+                    .config_state
+                    .overrides
+                    .groups
+                    .clone()
+                    .or_else(|| self.pesto_config.as_ref().map(|c| c.groups.join(", ")))
+                    .unwrap_or_default();
+                self.confirm_edit_buf = current;
+                self.confirm_editing = true;
+            }
             _ => {}
         }
     }
 
-    /// Decrement the currently selected field (PAR2 only; other fields cycle on toggle).
+    pub fn confirm_field_increment(&mut self) {
+        if self.confirm_field == 1 {
+            let current = self
+                .config_state
+                .overrides
+                .par2
+                .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
+            self.config_state.overrides.par2 = Some(if current >= 50 { 0 } else { current + 5 });
+        }
+    }
+
     pub fn confirm_field_decrement(&mut self) {
         if self.confirm_field == 1 {
             let current = self
@@ -972,13 +1017,48 @@ impl App {
                 .overrides
                 .par2
                 .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
-            let next = if current == 0 {
+            self.config_state.overrides.par2 = Some(if current == 0 {
                 50
             } else {
                 current.saturating_sub(5)
-            };
-            self.config_state.overrides.par2 = Some(next);
+            });
         }
+    }
+
+    /// Commit the text edit buffer into the relevant session override.
+    pub fn confirm_confirm_edit(&mut self) {
+        let buf = self.confirm_edit_buf.trim().to_string();
+        match self.confirm_field {
+            1 => {
+                self.config_state.overrides.par2 = buf.parse::<u8>().ok().map(|v| v.min(50));
+            }
+            3 => {
+                self.config_state.overrides.nzb_password =
+                    if buf.is_empty() { None } else { Some(buf) };
+            }
+            4 => {
+                self.config_state.overrides.groups = if buf.is_empty() { None } else { Some(buf) };
+            }
+            _ => {}
+        }
+        self.confirm_editing = false;
+        self.confirm_edit_buf.clear();
+    }
+
+    pub fn confirm_cancel_edit(&mut self) {
+        self.confirm_editing = false;
+        self.confirm_edit_buf.clear();
+    }
+
+    pub fn confirm_toggle_password_reveal(&mut self) {
+        self.confirm_show_password = !self.confirm_show_password;
+    }
+
+    /// Reset all confirm-panel overrides and close the panel.
+    pub fn confirm_close(&mut self) {
+        self.show_upload_confirm = false;
+        self.confirm_editing = false;
+        self.confirm_edit_buf.clear();
     }
 }
 
