@@ -1,5 +1,4 @@
 use crate::app::{App, AppState};
-use crate::events::UploadPhase;
 use pesto::config::ObfuscateMode;
 pub mod components;
 
@@ -674,43 +673,28 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
-    let mut constraints = vec![
-        Constraint::Length(7), // Phase indicator + gauge + sparkline (only when uploading)
-        Constraint::Min(8),    // Main split (Queue + Logs)
-    ];
-
-    if !app.upload_in_progress {
-        constraints.remove(0); // no progress bar when idle
-    }
-
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    let content_area = if app.upload_in_progress {
-        // Draw progress bar at top
-        draw_progress_section(f, app, main_chunks[0]);
-        main_chunks[1]
+    if app.upload_in_progress {
+        draw_upload_progress_screen(f, app, area);
     } else {
-        main_chunks[0]
-    };
+        draw_dashboard_idle(f, app, area);
+    }
+}
 
-    // Split remaining into Queue (left) + Logs (right)
+fn draw_dashboard_idle(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(content_area);
+        .split(area);
 
-    if app.upload_in_progress && !app.progress.files.is_empty() {
-        draw_per_file_progress(f, app, chunks[0]);
-    } else if !app.upload_queue.items.is_empty() {
+    if !app.upload_queue.items.is_empty() {
         draw_upload_settings_summary(f, app, chunks[0]);
     } else {
         let idle = Paragraph::new(
             "No files in queue.\n\n\
-             Go to Browser tab (press Tab) → navigate with j/k/Enter → add files with Enter.\n\
-             Then come back here and press 'u' to start upload.",
+             Go to Browser tab (Tab) →\n\
+             navigate with j/k/Enter →\n\
+             mark with Space →\n\
+             press u to queue & upload.",
         )
         .block(
             Block::default()
@@ -723,167 +707,241 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     app.log_panel.render(f, chunks[1]);
 }
 
-fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
-    let p = &app.progress;
-    let is_paused = app.upload_paused;
-
-    // Layout: phase bar (1 line) + main gauge (3 lines) + sparkline (3 lines)
-    let chunks = Layout::default()
+fn draw_upload_progress_screen(f: &mut Frame, app: &mut App, area: Rect) {
+    // Layout: three progress bars + sparkline on top; per-file + log below.
+    let vchunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Phase indicator
-            Constraint::Length(3), // Main upload gauge
-            Constraint::Length(3), // Sparkline
+            Constraint::Length(3), // Compress bar
+            Constraint::Length(3), // PAR2 bar
+            Constraint::Length(3), // Upload bar (primary)
+            Constraint::Length(3), // Speed sparkline
+            Constraint::Min(4),    // Per-file (left) + Log (right)
         ])
         .split(area);
 
-    // ── Status line: phase + concurrent PAR2 info ───────────────────────────
-    let status_line: Vec<Span> = {
-        let mut spans = vec![Span::raw("  ")];
-        match &p.phase {
-            UploadPhase::Compressing {
-                done_bytes,
-                total_bytes,
-            } if *total_bytes > 0 => {
-                let pct = (*done_bytes as f64 / *total_bytes as f64 * 100.0) as u8;
-                spans.push(Span::styled(
-                    format!(
-                        "[Compress]  {pct}%  {}/{}",
-                        pesto::progress::format_size(*done_bytes),
-                        pesto::progress::format_size(*total_bytes)
-                    ),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            UploadPhase::WritingPar2 { written, total } if *total > 0 => {
-                let pct = (*written as f64 / *total as f64 * 100.0) as u8;
-                spans.push(Span::styled(
-                    format!("[Writing PAR2 volumes]  {pct}%  {written}/{total}"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            UploadPhase::Verifying { checked, total } if *total > 0 => {
-                let pct = (*checked as f64 / *total as f64 * 100.0) as u8;
-                spans.push(Span::styled(
-                    format!("[Verify]  {pct}%  {checked}/{total} articles"),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            _ => {
-                // Uploading (main phase) — show upload speed + concurrent PAR2
-                let speed = if p.last_speed > 0.1 {
-                    format!("{:.1} MB/s", p.last_speed)
-                } else {
-                    "connecting...".to_string()
-                };
-                spans.push(Span::styled(
-                    "[Upload] ",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(speed));
+    draw_compress_bar(f, app, vchunks[0]);
+    draw_par2_bar(f, app, vchunks[1]);
+    draw_upload_bar(f, app, vchunks[2]);
+    draw_speed_sparkline(f, app, vchunks[3]);
 
-                // Show PAR2 concurrent progress if active
-                if p.par2_total_slices > 0 {
-                    let par2_pct =
-                        (p.par2_done_slices as f64 / p.par2_total_slices as f64 * 100.0) as usize;
-                    spans.push(Span::styled(
-                        format!(
-                            "   PAR2 (concurrent): {par2_pct}%  {}/{} slices",
-                            p.par2_done_slices, p.par2_total_slices
-                        ),
-                        Style::default().fg(Color::Cyan),
-                    ));
-                }
-            }
-        }
-        spans
+    // Bottom: per-file list left + log right
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(vchunks[4]);
+
+    if !app.progress.files.is_empty() {
+        draw_per_file_progress(f, app, bottom[0]);
+    } else {
+        // Fallback: show queue list while upload is spinning up
+        let items: Vec<ListItem> = app
+            .upload_queue
+            .items
+            .iter()
+            .map(|p| {
+                let name = std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(p);
+                ListItem::new(Line::from(vec![
+                    Span::styled(" ○ ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(name.to_string()),
+                ]))
+            })
+            .collect();
+        f.render_widget(
+            List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Files (preparing…) "),
+            ),
+            bottom[0],
+        );
+    }
+
+    app.log_panel.render(f, bottom[1]);
+}
+
+fn draw_compress_bar(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.progress;
+
+    let (pct, label, style) = if p.compress_total_bytes == 0 {
+        // Compression not configured
+        (
+            0u16,
+            "not configured".to_string(),
+            Style::default().fg(Color::DarkGray).bg(Color::Reset),
+        )
+    } else if p.compress_finished {
+        (
+            100u16,
+            format!(
+                "done  {}",
+                pesto::progress::format_size(p.compress_total_bytes)
+            ),
+            Style::default().fg(Color::DarkGray).bg(Color::Reset),
+        )
+    } else {
+        let pct = if p.compress_total_bytes > 0 {
+            (p.compress_done_bytes as f64 / p.compress_total_bytes as f64 * 100.0).min(100.0) as u16
+        } else {
+            0
+        };
+        (
+            pct,
+            format!(
+                "{}%  {} / {}",
+                pct,
+                pesto::progress::format_size(p.compress_done_bytes),
+                pesto::progress::format_size(p.compress_total_bytes)
+            ),
+            Style::default().fg(Color::Blue).bg(Color::DarkGray),
+        )
     };
-    f.render_widget(Paragraph::new(Line::from(status_line)), chunks[0]);
 
-    // ── Main upload gauge ────────────────────────────────────────────────────
-    let (pct, label) = match &p.phase {
-        UploadPhase::WritingPar2 { written, total } if *total > 0 => {
-            let phase_pct = (*written as f64 / *total as f64 * 100.0) as u16;
-            let lbl = format!("Writing PAR2  {:.1}%  {}/{}", phase_pct, written, total);
-            (phase_pct, lbl)
-        }
-        UploadPhase::Compressing {
-            done_bytes: db,
-            total_bytes: tb,
-        } if *tb > 0 => {
-            let phase_pct = (*db as f64 / *tb as f64 * 100.0) as u16;
-            let lbl = format!(
-                "Compress  {:.1}%  {}/{}",
-                phase_pct,
-                pesto::progress::format_size(*db),
-                pesto::progress::format_size(*tb),
-            );
-            (phase_pct, lbl)
-        }
-        UploadPhase::Verifying { checked, total } if *total > 0 => {
-            let phase_pct = (*checked as f64 / *total as f64 * 100.0) as u16;
-            let lbl = format!("Verify  {:.1}%  {}/{} articles", phase_pct, checked, total);
-            (phase_pct, lbl)
-        }
-        _ => {
-            // Uploading or Preparing: upload bytes/speed/ETA
-            let upload_pct = p.progress_pct() as u16;
-            let speed = if p.last_speed > 0.1 {
-                format!("{:.1} MB/s", p.last_speed)
-            } else {
-                "calculating...".to_string()
-            };
-            let eta = if let Some(secs) = p.eta_seconds() {
-                format!("ETA {}:{:02}", secs / 60, secs % 60)
-            } else {
-                "ETA --:--".to_string()
-            };
-            let lbl = format!(
-                "{:.1}%  {}/{}  {}  {}",
-                p.progress_pct(),
-                pesto::progress::format_size(p.done_bytes),
-                pesto::progress::format_size(p.total_bytes),
-                speed,
-                eta,
-            );
-            (upload_pct, lbl)
-        }
+    let border_style = if p.compress_total_bytes > 0 && !p.compress_finished {
+        Style::default().fg(Color::Blue)
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
 
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(if is_paused {
-            " Upload Progress — PAUSED (p: resume, x: cancel) "
-        } else {
-            " Upload Progress (p: pause, x: cancel) "
-        }))
-        .gauge_style(if is_paused {
-            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::Green).bg(Color::DarkGray)
-        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Compress ")
+                .border_style(border_style),
+        )
+        .gauge_style(style)
         .percent(pct)
-        .label(if is_paused {
-            "PAUSED".to_string()
-        } else {
-            label
-        });
-    f.render_widget(gauge, chunks[1]);
+        .label(label);
+    f.render_widget(gauge, area);
+}
 
-    // ── Speed sparkline ──────────────────────────────────────────────────────
+fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.progress;
+
+    let par2_done = p.par2_total_slices > 0 && p.par2_done_slices >= p.par2_total_slices;
+    let par2_active = p.par2_total_slices > 0 && !par2_done;
+
+    let (pct, label, style) = if p.par2_total_slices == 0 {
+        (
+            0u16,
+            "pending…".to_string(),
+            Style::default().fg(Color::DarkGray).bg(Color::Reset),
+        )
+    } else if par2_done {
+        (
+            100u16,
+            format!("done  {} slices", p.par2_total_slices),
+            Style::default().fg(Color::DarkGray).bg(Color::Reset),
+        )
+    } else {
+        let pct =
+            (p.par2_done_slices as f64 / p.par2_total_slices as f64 * 100.0).min(100.0) as u16;
+        (
+            pct,
+            format!(
+                "{}%  {}/{} slices",
+                pct, p.par2_done_slices, p.par2_total_slices
+            ),
+            Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+        )
+    };
+
+    let border_style = if par2_active {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" PAR2 ")
+                .border_style(border_style),
+        )
+        .gauge_style(style)
+        .percent(pct)
+        .label(label);
+    f.render_widget(gauge, area);
+}
+
+fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.progress;
+    let is_paused = app.upload_paused;
+
+    let upload_pct = p.progress_pct() as u16;
+
+    let speed_str = if p.last_speed > 0.1 {
+        format!("{:.1} MB/s", p.last_speed)
+    } else {
+        "connecting…".to_string()
+    };
+    let eta_str = if let Some(secs) = p.eta_seconds() {
+        format!("ETA {}:{:02}", secs / 60, secs % 60)
+    } else {
+        "ETA --:--".to_string()
+    };
+
+    let label = if is_paused {
+        "PAUSED".to_string()
+    } else {
+        format!(
+            "{}%  {} / {}  {}  {}",
+            upload_pct,
+            pesto::progress::format_size(p.done_bytes),
+            pesto::progress::format_size(p.total_bytes),
+            speed_str,
+            eta_str,
+        )
+    };
+
+    let gauge_style = if is_paused {
+        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+    } else {
+        Style::default()
+            .fg(Color::Green)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let title = if is_paused {
+        " UPLOAD — PAUSED  [p: resume  x: cancel] "
+    } else {
+        " UPLOAD  [p: pause  x: cancel] "
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .gauge_style(gauge_style)
+        .percent(upload_pct)
+        .label(label);
+    f.render_widget(gauge, area);
+}
+
+fn draw_speed_sparkline(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.progress;
     let spark_data: Vec<u64> = p.speed_history.iter().map(|&s| (s * 10.0) as u64).collect();
+    let is_paused = app.upload_paused;
+
     let sparkline = Sparkline::default()
         .block(
             Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .title(format!(" Speed ({} samples) ", spark_data.len())),
+                .title(format!(" Speed history ({} samples) ", spark_data.len())),
         )
         .data(&spark_data)
         .style(if is_paused {
@@ -891,7 +949,7 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::Cyan)
         });
-    f.render_widget(sparkline, chunks[2]);
+    f.render_widget(sparkline, area);
 }
 
 fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {

@@ -266,7 +266,7 @@ This phase is lower priority. Do not block earlier phases on it.
 | 40b       | Core upload flow, progress bars, catalog, history| ✅ Done    |
 | 41a       | Three-pane browser with NZB status column        | ✅ Done    |
 | 41b       | Upload config panel redesign                     | ✅ Done    |
-| 41c       | Full-height upload progress screen               | 🔲 Next   |
+| 41c       | Full-height upload progress screen               | ✅ Done    |
 | 42        | NZB Vault screen                                 | 🔲 Planned |
 | 43a       | Prowlarr config + connection check               | 🔲 Planned |
 | 43b       | Prowlarr NZB search                              | 🔲 Planned |

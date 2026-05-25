@@ -40,6 +40,11 @@ pub struct UploadProgress {
     /// PAR2 encoding progress (runs concurrently with NNTP posting)
     pub par2_done_slices: usize,
     pub par2_total_slices: usize,
+
+    /// Compression progress (tracked separately for the three-bar display)
+    pub compress_total_bytes: u64,
+    pub compress_done_bytes: u64,
+    pub compress_finished: bool,
 }
 
 /// Progress of a single file during an active upload.
@@ -120,6 +125,24 @@ impl UploadProgress {
             self.push_speed_sample(update.current_speed_mbps);
         }
         if let Some(ref phase) = update.phase {
+            // Track compress progress for the three-bar display
+            match phase {
+                UploadPhase::Compressing {
+                    done_bytes,
+                    total_bytes,
+                } => {
+                    if *total_bytes > 0 {
+                        self.compress_total_bytes = *total_bytes;
+                    }
+                    self.compress_done_bytes = *done_bytes;
+                }
+                _ if self.compress_total_bytes > 0 && !self.compress_finished => {
+                    // Phase moved past Compressing → compression is done
+                    self.compress_finished = true;
+                    self.compress_done_bytes = self.compress_total_bytes;
+                }
+                _ => {}
+            }
             self.phase = phase.clone();
         }
         if let Some((done, total)) = update.par2_slices {
