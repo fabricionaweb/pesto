@@ -589,6 +589,7 @@ async fn run_real_upload(
         message: None,
         file_update: None,
         phase: None,
+        par2_slices: None,
     };
 
     // Drain progress events as they arrive (real-time, not post-hoc)
@@ -711,9 +712,13 @@ fn extract_progress_update(
     use pesto::progress::ProgressEvent as E;
 
     match ev {
-        E::Started { files, .. } => {
+        E::Started {
+            files,
+            par2_bytes_hint,
+            ..
+        } => {
             let total_segments: u64 = files.iter().map(|f| f.segments).sum();
-            let total_bytes: u64 = files.iter().map(|f| f.bytes).sum();
+            let total_bytes: u64 = files.iter().map(|f| f.bytes).sum::<u64>() + par2_bytes_hint;
             Some(ProgressUpdate {
                 done_segments: 0,
                 total_segments,
@@ -723,6 +728,7 @@ fn extract_progress_update(
                 message: None,
                 file_update: None,
                 phase: Some(UploadPhase::Uploading),
+                par2_slices: None,
             })
         }
         E::CompressStarted { total_bytes } => Some(ProgressUpdate {
@@ -737,6 +743,7 @@ fn extract_progress_update(
                 done_bytes: 0,
                 total_bytes: *total_bytes,
             }),
+            par2_slices: None,
         }),
         E::CompressProgress { bytes_written } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -753,6 +760,7 @@ fn extract_progress_update(
                     _ => 0,
                 },
             }),
+            par2_slices: None,
         }),
         E::CompressDone => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -763,7 +771,11 @@ fn extract_progress_update(
             message: None,
             file_update: None,
             phase: Some(UploadPhase::Preparing),
+            par2_slices: None,
         }),
+        // Par2EncodeStarted is a config announcement, NOT a sequential phase.
+        // PAR2 encoding runs concurrently with NNTP posting. Store total slices
+        // for the concurrent progress indicator; keep the phase as Uploading.
         E::Par2EncodeStarted {
             recovery_slices, ..
         } => Some(ProgressUpdate {
@@ -774,10 +786,8 @@ fn extract_progress_update(
             current_speed_mbps: previous.current_speed_mbps,
             message: None,
             file_update: None,
-            phase: Some(UploadPhase::GeneratingPar2 {
-                done_slices: 0,
-                total_slices: *recovery_slices,
-            }),
+            phase: Some(UploadPhase::Uploading),
+            par2_slices: Some((0, *recovery_slices)),
         }),
         E::Par2InputProgress { done, total } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -785,13 +795,12 @@ fn extract_progress_update(
             done_bytes: previous.done_bytes,
             total_bytes: previous.total_bytes,
             current_speed_mbps: previous.current_speed_mbps,
-            message: None, // shown in gauge, not logs
+            message: None,
             file_update: None,
-            phase: Some(UploadPhase::GeneratingPar2 {
-                done_slices: *done,
-                total_slices: *total,
-            }),
+            phase: None, // phase stays Uploading
+            par2_slices: Some((*done, *total)),
         }),
+        // PAR2 volumes are written to disk after encoding completes (sequential).
         E::Par2WriteStarted { total } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
             total_segments: previous.total_segments,
@@ -804,6 +813,7 @@ fn extract_progress_update(
                 written: 0,
                 total: *total,
             }),
+            par2_slices: None,
         }),
         E::Par2SliceWritten => {
             let (written, total) = match &previous.phase {
@@ -819,6 +829,7 @@ fn extract_progress_update(
                 message: None,
                 file_update: None,
                 phase: Some(UploadPhase::WritingPar2 { written, total }),
+                par2_slices: None,
             })
         }
         E::CheckStarted { total } => Some(ProgressUpdate {
@@ -833,6 +844,7 @@ fn extract_progress_update(
                 checked: 0,
                 total: *total,
             }),
+            par2_slices: None,
         }),
         E::CheckProgress { checked, .. } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -849,6 +861,7 @@ fn extract_progress_update(
                     _ => 0,
                 },
             }),
+            par2_slices: None,
         }),
         E::SegmentDone { file, bytes, ok } => {
             let file_update = FileProgressUpdate {
@@ -868,6 +881,7 @@ fn extract_progress_update(
                 message: None,
                 file_update: Some(file_update),
                 phase: None,
+                par2_slices: None,
             })
         }
         E::QueueExtended {
@@ -881,6 +895,7 @@ fn extract_progress_update(
             message: None,
             file_update: None,
             phase: None,
+            par2_slices: None,
         }),
         _ => None,
     }
