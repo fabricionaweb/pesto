@@ -3,6 +3,31 @@
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+/// Which phase of the pipeline is currently active.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UploadPhase {
+    #[default]
+    Preparing,
+    Compressing {
+        done_bytes: u64,
+        total_bytes: u64,
+    },
+    GeneratingPar2 {
+        done_slices: usize,
+        total_slices: usize,
+    },
+    WritingPar2 {
+        written: u32,
+        total: u32,
+    },
+    Uploading,
+    Verifying {
+        checked: u64,
+        total: u64,
+    },
+    Done,
+}
+
 /// Structured progress information extracted from pesto::progress::ProgressEvent
 #[derive(Debug, Clone)]
 pub struct ProgressUpdate {
@@ -15,6 +40,9 @@ pub struct ProgressUpdate {
 
     /// Optional per-file update (when a specific file advanced)
     pub file_update: Option<FileProgressUpdate>,
+
+    /// Current pipeline phase (None = no change from previous)
+    pub phase: Option<UploadPhase>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +52,7 @@ pub struct FileProgressUpdate {
     pub total_segments: u64,
     pub done_bytes: u64,
     pub total_bytes: u64,
-    pub ok: bool, // for SegmentDone
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +95,6 @@ impl EventHandler {
     }
 }
 
-// Helper to create a channel for pesto progress
 pub fn create_progress_channel() -> (UnboundedSender<String>, UnboundedReceiver<String>) {
     mpsc::unbounded_channel()
 }

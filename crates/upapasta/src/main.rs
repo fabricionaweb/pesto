@@ -1,4 +1,6 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{
+    io, path::PathBuf, sync::atomic::AtomicBool, sync::atomic::Ordering, sync::Arc, time::Duration,
+};
 
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEventKind},
@@ -17,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 mod app;
 mod catalog;
 mod events;
+mod hooks;
+mod nzb_viewer;
 mod ui;
 
 use app::App;
@@ -86,10 +90,20 @@ async fn run_app<B: ratatui::backend::Backend>(
         while let Ok(event) = rx.try_recv() {
             match event {
                 AppEvent::Key(key) => match key.code {
-                    KeyCode::Char('q') if !app.log_panel.searching && !app.history.searching => {
+                    KeyCode::Char('q')
+                        if !app.log_panel.searching
+                            && !app.history.searching
+                            && app.history.nzb_viewer.is_none()
+                            && !app.config_state.editing =>
+                    {
                         return Ok(())
                     }
-                    KeyCode::Esc if !app.log_panel.searching && !app.history.searching => {
+                    KeyCode::Esc
+                        if !app.log_panel.searching
+                            && !app.history.searching
+                            && app.history.nzb_viewer.is_none()
+                            && !app.config_state.editing =>
+                    {
                         return Ok(())
                     }
                     KeyCode::Tab => {
@@ -104,12 +118,31 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.refresh_history();
                         }
                     }
+                    // ── Upload confirm modal (any state) ──────────────────
+                    _ if app.show_upload_confirm => match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') => {
+                            app.show_upload_confirm = false;
+                            handle_upload_trigger(app, tx.clone());
+                        }
+                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                            app.show_upload_confirm = false;
+                            app.status_bar.set("Upload cancelled");
+                        }
+                        _ => {}
+                    },
                     KeyCode::Char('h') if app.state == app::AppState::Browser => {
                         app.file_tree.toggle_hidden();
                     }
                     _ if app.state == app::AppState::Browser => match key.code {
                         KeyCode::Up | KeyCode::Char('k') => app.file_tree.select_previous(),
                         KeyCode::Down | KeyCode::Char('j') => app.file_tree.select_next(),
+                        KeyCode::Char(' ') => {
+                            // Space: mark/unmark current item and advance cursor
+                            app.file_tree.toggle_mark();
+                            let n = app.file_tree.marked_count();
+                            app.status_bar
+                                .set(format!("{} item(s) marked — press u to queue & upload", n));
+                        }
                         KeyCode::Enter => {
                             if let Some(selected) = app.file_tree.get_selected().cloned() {
                                 if selected.is_dir() {
@@ -118,7 +151,6 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     app.file_tree.selected = 0;
                                 } else {
                                     let path_str = selected.to_string_lossy().to_string();
-                                    // Toggle: if already in queue, remove it
                                     if app.upload_queue.items.contains(&path_str) {
                                         app.upload_queue.items.retain(|p| p != &path_str);
                                         app.status_bar.set("Removed from queue");
@@ -133,14 +165,29 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.file_tree.go_to_parent();
                         }
                         KeyCode::Char('u') => {
-                            handle_upload_trigger(app, tx.clone());
+                            // Queue all marked items first
+                            let marked = app.file_tree.take_marked();
+                            for p in marked {
+                                app.add_to_queue(p.to_string_lossy().to_string());
+                            }
+                            if app.upload_queue.items.is_empty() {
+                                app.status_bar
+                                    .set("Queue is empty — mark files with Space first");
+                            } else {
+                                app.show_upload_confirm = true;
+                            }
                         }
                         _ => {}
                     },
                     KeyCode::Char('u')
                         if app.state == app::AppState::Dashboard && !app.log_panel.searching =>
                     {
-                        handle_upload_trigger(app, tx.clone());
+                        if app.upload_queue.items.is_empty() {
+                            app.status_bar
+                                .set("Queue is empty — go to Browser and mark files with Space");
+                        } else {
+                            app.show_upload_confirm = true;
+                        }
                     }
                     // ── Log panel search (Dashboard) ───────────────────────
                     _ if app.state == app::AppState::Dashboard && app.log_panel.searching => {
@@ -235,10 +282,22 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.upload_queue.select_previous();
                     }
                     // ── History screen keys ────────────────────────────────
+                    // NZB viewer overlay takes priority when open
+                    _ if app.state == app::AppState::History
+                        && app.history.nzb_viewer.is_some() =>
+                    {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_nzb_viewer(),
+                            KeyCode::Char('j') | KeyCode::Down => app.nzb_viewer_scroll_down(),
+                            KeyCode::Char('k') | KeyCode::Up => app.nzb_viewer_scroll_up(),
+                            _ => {}
+                        }
+                    }
                     _ if app.state == app::AppState::History && !app.history.searching => {
                         match key.code {
                             KeyCode::Char('j') | KeyCode::Down => app.history_select_next(),
                             KeyCode::Char('k') | KeyCode::Up => app.history_select_prev(),
+                            KeyCode::Enter => app.open_nzb_viewer(),
                             KeyCode::Char('s') => {
                                 app.history.show_stats = !app.history.show_stats;
                                 if app.history.show_stats {
@@ -273,6 +332,28 @@ async fn run_app<B: ratatui::backend::Backend>(
                             _ => {}
                         }
                     }
+                    // ── Config screen keys ────────────────────────────────
+                    _ if app.state == app::AppState::Config && app.config_state.editing => {
+                        match key.code {
+                            KeyCode::Esc => app.config_cancel_edit(),
+                            KeyCode::Enter => app.config_confirm_edit(),
+                            KeyCode::Backspace => {
+                                app.config_state.edit_buf.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.config_state.edit_buf.push(c);
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ if app.state == app::AppState::Config => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.config_select_next(),
+                        KeyCode::Char('k') | KeyCode::Up => app.config_select_prev(),
+                        KeyCode::Enter | KeyCode::Char('e') => app.config_start_edit(),
+                        KeyCode::Char('r') => app.config_reset_field(),
+                        KeyCode::Char('R') => app.config_reset_all(),
+                        _ => {}
+                    },
                     _ => {}
                 },
                 AppEvent::Progress(msg) => {
@@ -325,16 +406,20 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         return;
     }
 
-    // Use real config if loaded, otherwise fall back to dry-run
-    let config = if let Some(cfg) = &app.pesto_config {
-        // Clone because we may want to force dry_run in future UI options
-        let mut real_cfg = cfg.clone();
-        // For now, always do real upload when config exists
+    // Use real config (with session overrides applied) or fall back to dry-run
+    let config = if let Some(mut real_cfg) = app.effective_config_with_overrides() {
         real_cfg.dry_run = false;
         real_cfg
     } else {
         build_dry_run_config()
     };
+
+    // Collect file names for the hook context (display names, not full paths)
+    let queue_names: Vec<String> = files
+        .iter()
+        .filter_map(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
 
     // Convert to pesto InputFile
     let input_files: Vec<InputFile> = files
@@ -354,10 +439,24 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     // Spawn the actual upload task
     tokio::spawn(async move {
         let tx2 = tx.clone();
-        let result = run_real_upload(config, input_files, tx.clone(), cancel_token).await;
+        let result = run_real_upload(config.clone(), input_files, tx.clone(), cancel_token).await;
 
         let success = result.is_ok();
         let cancelled = result.as_ref().is_ok_and(|r| r.cancelled);
+
+        // Run post-upload hooks on successful, non-cancelled upload
+        if success && !cancelled {
+            let total_bytes = result.as_ref().map(|r| r.total_bytes).unwrap_or(0);
+            let ctx = hooks::HookContext::from_config(&config, &queue_names, total_bytes, None);
+            let hook_cfg = config.clone();
+            let log_lines = tokio::task::spawn_blocking(move || hooks::run_hooks(&hook_cfg, &ctx))
+                .await
+                .unwrap_or_else(|e| vec![format!("hook task error: {e}")]);
+            for line in log_lines {
+                let _ = tx2.send(AppEvent::Progress(format!("[hook] {}", line)));
+            }
+        }
+
         if let Err(ref e) = result {
             if !e.is_cancelled() {
                 let _ = tx2.send(AppEvent::UploadError(e.to_string()));
@@ -430,14 +529,25 @@ fn build_dry_run_config() -> Config {
 }
 
 /// The actual async upload worker. Forwards every ProgressEvent into the UI.
-/// Supports cancellation via CancellationToken.
+/// Supports cancellation via CancellationToken (bridged to pesto's AtomicBool).
 async fn run_real_upload(
     config: Config,
     files: Vec<InputFile>,
     tx: mpsc::UnboundedSender<AppEvent>,
     cancel_token: CancellationToken,
 ) -> Result<UploadResult, UploadError> {
-    let (outcome, mut rx) = match pesto::post(config, files).await {
+    // Bridge: spawn a task that sets the AtomicBool when the token fires.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let flag = cancel_flag.clone();
+        let token = cancel_token.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(true, Ordering::Relaxed);
+        });
+    }
+
+    let (outcome, mut rx) = match pesto::post_cancelable(config, files, cancel_flag).await {
         Ok(v) => v,
         Err(e) => return Err(UploadError::Pesto(e.to_string())),
     };
@@ -450,40 +560,25 @@ async fn run_real_upload(
         current_speed_mbps: 0.0,
         message: None,
         file_update: None,
+        phase: None,
     };
 
-    loop {
-        tokio::select! {
-            biased;
+    while let Some(event) = rx.recv().await {
+        let msg = format_progress_event(&event);
+        if !msg.is_empty() {
+            let _ = tx.send(AppEvent::Progress(msg));
+        }
 
-            _ = cancel_token.cancelled() => {
-                // Best effort: drop the receiver to let pesto wind down
-                drop(rx);
-                return Ok(UploadResult { cancelled: true });
-            }
+        if let Some(update) = extract_progress_update(&event, &last_update) {
+            last_update = update.clone();
+            let _ = tx.send(AppEvent::ProgressUpdate(update));
+        }
 
-            ev = rx.recv() => {
-                match ev {
-                    Some(event) => {
-                        // Send human readable log
-                        let msg = format_progress_event(&event);
-                        if !msg.is_empty() {
-                            let _ = tx.send(AppEvent::Progress(msg));
-                        }
-
-                        // Build structured update when possible
-                        if let Some(update) = extract_progress_update(&event, &last_update) {
-                            last_update = update.clone();
-                            let _ = tx.send(AppEvent::ProgressUpdate(update));
-                        }
-
-                        if matches!(event, pesto::progress::ProgressEvent::Finished) {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
+        if matches!(
+            event,
+            pesto::progress::ProgressEvent::Finished | pesto::progress::ProgressEvent::Interrupted
+        ) {
+            break;
         }
     }
 
@@ -494,12 +589,18 @@ async fn run_real_upload(
         outcome.failures.len()
     )));
 
-    Ok(UploadResult { cancelled: false })
+    let cancelled = outcome.cancelled;
+    let total_bytes = last_update.total_bytes;
+    Ok(UploadResult {
+        cancelled,
+        total_bytes,
+    })
 }
 
 #[derive(Debug)]
 struct UploadResult {
     cancelled: bool,
+    total_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -577,6 +678,7 @@ fn extract_progress_update(
     ev: &pesto::progress::ProgressEvent,
     previous: &ProgressUpdate,
 ) -> Option<ProgressUpdate> {
+    use crate::events::UploadPhase;
     use pesto::progress::ProgressEvent as E;
 
     match ev {
@@ -591,30 +693,152 @@ fn extract_progress_update(
                 current_speed_mbps: 0.0,
                 message: None,
                 file_update: None,
+                phase: Some(UploadPhase::Uploading),
             })
         }
+        E::CompressStarted { total_bytes } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::Compressing {
+                done_bytes: 0,
+                total_bytes: *total_bytes,
+            }),
+        }),
+        E::CompressProgress { bytes_written } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::Compressing {
+                done_bytes: *bytes_written,
+                total_bytes: match &previous.phase {
+                    Some(UploadPhase::Compressing { total_bytes, .. }) => *total_bytes,
+                    _ => 0,
+                },
+            }),
+        }),
+        E::CompressDone => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::Preparing),
+        }),
+        E::Par2EncodeStarted {
+            recovery_slices, ..
+        } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::GeneratingPar2 {
+                done_slices: 0,
+                total_slices: *recovery_slices,
+            }),
+        }),
+        E::Par2InputProgress { done, total } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: Some(format!("PAR2 encoding: {}/{} slices", done, total)),
+            file_update: None,
+            phase: Some(UploadPhase::GeneratingPar2 {
+                done_slices: *done,
+                total_slices: *total,
+            }),
+        }),
+        E::Par2WriteStarted { total } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::WritingPar2 {
+                written: 0,
+                total: *total,
+            }),
+        }),
+        E::Par2SliceWritten => {
+            let (written, total) = match &previous.phase {
+                Some(UploadPhase::WritingPar2 { written, total }) => (written + 1, *total),
+                _ => (1, 1),
+            };
+            Some(ProgressUpdate {
+                done_segments: previous.done_segments,
+                total_segments: previous.total_segments,
+                done_bytes: previous.done_bytes,
+                total_bytes: previous.total_bytes,
+                current_speed_mbps: previous.current_speed_mbps,
+                message: None,
+                file_update: None,
+                phase: Some(UploadPhase::WritingPar2 { written, total }),
+            })
+        }
+        E::CheckStarted { total } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::Verifying {
+                checked: 0,
+                total: *total,
+            }),
+        }),
+        E::CheckProgress { checked, .. } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: previous.current_speed_mbps,
+            message: None,
+            file_update: None,
+            phase: Some(UploadPhase::Verifying {
+                checked: *checked,
+                total: match &previous.phase {
+                    Some(UploadPhase::Verifying { total, .. }) => *total,
+                    _ => 0,
+                },
+            }),
+        }),
         E::SegmentDone { file, bytes, ok } => {
             let file_update = FileProgressUpdate {
                 name: file.clone(),
-                done_segments: 1, // incremental
+                done_segments: 1,
                 total_segments: 0,
                 done_bytes: *bytes,
                 total_bytes: 0,
                 ok: *ok,
             };
-
             Some(ProgressUpdate {
                 done_segments: previous.done_segments + 1,
                 total_segments: previous.total_segments,
                 done_bytes: previous.done_bytes + bytes,
                 total_bytes: previous.total_bytes,
                 current_speed_mbps: previous.current_speed_mbps,
-                message: Some(format!(
-                    "Segment {} — {}",
-                    if *ok { "ok" } else { "FAIL" },
-                    file
-                )),
+                message: None,
                 file_update: Some(file_update),
+                phase: None,
             })
         }
         E::QueueExtended {
@@ -627,15 +851,7 @@ fn extract_progress_update(
             current_speed_mbps: previous.current_speed_mbps,
             message: None,
             file_update: None,
-        }),
-        E::Par2InputProgress { done, total } => Some(ProgressUpdate {
-            done_segments: previous.done_segments,
-            total_segments: previous.total_segments,
-            done_bytes: previous.done_bytes,
-            total_bytes: previous.total_bytes,
-            current_speed_mbps: previous.current_speed_mbps,
-            message: Some(format!("PAR2 input: {}/{}", done, total)),
-            file_update: None,
+            phase: None,
         }),
         _ => None,
     }

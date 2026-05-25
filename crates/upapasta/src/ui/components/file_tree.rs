@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
@@ -14,6 +15,8 @@ pub struct FileTree {
     pub current_dir: PathBuf,
     pub selected: usize,
     pub show_hidden: bool,
+    /// Absolute paths that have been marked for queuing (Space key)
+    pub marked: HashSet<PathBuf>,
 }
 
 impl FileTree {
@@ -23,6 +26,7 @@ impl FileTree {
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             selected: 0,
             show_hidden: false,
+            marked: HashSet::new(),
         };
         tree.refresh();
         tree
@@ -46,6 +50,29 @@ impl FileTree {
 
     pub fn get_selected(&self) -> Option<&PathBuf> {
         self.items.get(self.selected)
+    }
+
+    /// Toggle the mark on the currently selected item and advance cursor.
+    pub fn toggle_mark(&mut self) {
+        if let Some(path) = self.items.get(self.selected).cloned() {
+            if self.marked.contains(&path) {
+                self.marked.remove(&path);
+            } else {
+                self.marked.insert(path);
+            }
+        }
+        self.select_next();
+    }
+
+    /// Return all marked paths (files and directories). Clears the mark set.
+    pub fn take_marked(&mut self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.marked.drain().collect();
+        paths.sort();
+        paths
+    }
+
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
     }
 
     pub fn refresh(&mut self) {
@@ -102,24 +129,49 @@ impl FileTree {
             .iter()
             .enumerate()
             .map(|(i, path)| {
+                let is_marked = self.marked.contains(path);
                 let icon = if path.is_dir() { "📁" } else { "📄" };
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                let style = if i == self.selected {
+                let check = if is_marked { "[x] " } else { "[ ] " };
+
+                let is_selected = i == self.selected;
+                let check_style = if is_marked {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let name_style = if is_selected {
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
+                } else if is_marked {
+                    Style::default().fg(Color::Green)
                 } else {
                     Style::default()
                 };
-                ListItem::new(Span::styled(format!("{} {}", icon, name), style))
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(check, check_style),
+                    Span::styled(format!("{} {}", icon, name), name_style),
+                ]))
             })
             .collect();
 
+        let n_marked = self.marked.len();
+        let marked_hint = if n_marked > 0 {
+            format!(" — {} marked", n_marked)
+        } else {
+            String::new()
+        };
+
         let title = format!(
-            " Browser — {} ({} items{}) ",
+            " Browser — {} ({} items{}{}) ",
             self.current_dir.display(),
             self.items.len(),
-            if self.show_hidden { " • hidden" } else { "" }
+            if self.show_hidden { " • hidden" } else { "" },
+            marked_hint,
         );
 
         let border_style = if focused {
