@@ -264,7 +264,7 @@ This phase is lower priority. Do not block earlier phases on it.
 | Milestone | Description                                      | Status    |
 |-----------|--------------------------------------------------|-----------|
 | 40b       | Core upload flow, progress bars, catalog, history| ✅ Done    |
-| 41a       | Three-pane browser with NZB status column        | 🔲 Next   |
+| 41a       | Three-pane browser with NZB status column        | ✅ Done    |
 | 41b       | Upload config panel redesign                     | 🔲 Next   |
 | 41c       | Full-height upload progress screen               | 🔲 Next   |
 | 42        | NZB Vault screen                                 | 🔲 Planned |
