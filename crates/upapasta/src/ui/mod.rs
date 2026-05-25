@@ -131,28 +131,26 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
             draw_config(f, app, area);
         }
     }
-
-    // Upload confirmation modal (overlay over any screen)
-    if app.show_upload_confirm {
-        draw_upload_confirm_modal(f, app, area);
-    }
 }
 
 fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let has_queue = !app.upload_queue.items.is_empty();
 
     // Always show file tree (left 60%) + right panel (40%).
-    // Right panel: NZB detail on top, queue below (when queue non-empty).
     let hchunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    app.file_tree.render(f, hchunks[0], true);
+    app.file_tree
+        .render(f, hchunks[0], !app.show_upload_confirm);
 
     let right = hchunks[1];
-    if has_queue {
-        // Split right panel: NZB detail (top ~60%) + queue (bottom ~40%)
+    if app.show_upload_confirm {
+        // Upload config panel replaces the NZB detail + queue panels
+        draw_upload_config_panel(f, app, right);
+    } else if has_queue {
+        // NZB detail (top ~60%) + queue (bottom ~40%)
         let vchunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -428,167 +426,251 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_upload_confirm_modal(f: &mut Frame, app: &App, area: Rect) {
+fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
+    use pesto::config::ObfuscateMode;
+
     let s = app.effective_upload_settings();
     let queue = &app.upload_queue.items;
+    let cfg = app.pesto_config.as_ref();
+    let ov = &app.config_state.overrides;
 
-    // Modal dimensions: 60% wide, ~18 rows tall
-    let modal_w = (area.width * 60 / 100).max(50).min(area.width - 4);
-    let modal_h = (queue.len() as u16 + 16).min(area.height - 4);
-    let x = (area.width.saturating_sub(modal_w)) / 2 + area.x;
-    let y = (area.height.saturating_sub(modal_h)) / 2 + area.y;
-    let modal_rect = Rect::new(x, y, modal_w, modal_h);
+    let border_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
 
-    f.render_widget(Clear, modal_rect);
-
-    let inner = Block::default()
+    let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(
+        .border_style(border_style)
+        .title(Span::styled(
+            " Upload Config  [y: start  Esc: cancel] ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )
-        .title(" Confirm Upload ")
-        .title_style(
+        ));
+    let inner_area = outer.inner(area);
+    f.render_widget(outer, area);
+
+    // Vertical sections inside the panel
+    let file_count = queue.len().min(6) as u16;
+    let vchunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(file_count + 2), // files block
+            Constraint::Length(4),              // read-only info
+            Constraint::Min(7),                 // editable fields
+            Constraint::Length(1),              // bottom hint
+        ])
+        .split(inner_area);
+
+    // ── Files list ──────────────────────────────────────────────────────────
+    let file_items: Vec<Line> = queue
+        .iter()
+        .take(6)
+        .map(|p| {
+            let name = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            let max = (vchunks[0].width as usize).saturating_sub(4);
+            let short = if name.len() > max && max > 3 {
+                format!("{}…", &name[..max - 1])
+            } else {
+                name.to_string()
+            };
+            Line::from(vec![
+                Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                Span::raw(short),
+            ])
+        })
+        .collect();
+
+    let extra = queue.len().saturating_sub(6);
+    let file_title = if extra > 0 {
+        format!(" Files ({}, +{} more) ", queue.len(), extra)
+    } else {
+        format!(" Files ({}) ", queue.len())
+    };
+    let mut all_file_lines = file_items;
+    if extra > 0 {
+        all_file_lines.push(Line::from(Span::styled(
+            format!(" … and {} more", extra),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(all_file_lines).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .title(file_title)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
+        vchunks[0],
+    );
+
+    // ── Read-only info (server, compress) ──────────────────────────────────
+    let server_str = cfg
+        .map(|c| format!("{}:{}", c.host, c.port))
+        .unwrap_or_else(|| "dry-run".to_string());
+
+    let info_lines = vec![
+        Line::from(vec![
+            Span::styled(" Server   ", Style::default().fg(Color::DarkGray)),
+            Span::raw(server_str),
+        ]),
+        Line::from(vec![
+            Span::styled(" Compress ", Style::default().fg(Color::DarkGray)),
+            Span::raw(s.compression.clone()),
+        ]),
+    ];
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(info_lines).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
+        vchunks[1],
+    );
+
+    // ── Editable fields ─────────────────────────────────────────────────────
+    let obf_str = match ov
+        .obfuscate
+        .unwrap_or(cfg.map(|c| c.obfuscate).unwrap_or(ObfuscateMode::None))
+    {
+        ObfuscateMode::None => "none",
+        ObfuscateMode::Subject => "subject",
+        ObfuscateMode::Full => "full",
+    };
+    let par2_str = format!("{}%", ov.par2.unwrap_or(cfg.map(|c| c.par2).unwrap_or(10)));
+    let verify_str = if ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)) {
+        "on"
+    } else {
+        "off"
+    };
+
+    let pw_raw = ov
+        .nzb_password
+        .as_deref()
+        .or_else(|| cfg.and_then(|c| c.nzb_password.as_deref()))
+        .unwrap_or("");
+    let pw_display = if pw_raw.is_empty() {
+        "—".to_string()
+    } else if app.confirm_show_password {
+        pw_raw.to_string()
+    } else {
+        "•".repeat(pw_raw.len().min(20))
+    };
+
+    let groups_str = ov
+        .groups
+        .clone()
+        .or_else(|| cfg.map(|c| c.groups.join(", ")))
+        .unwrap_or_else(|| "—".to_string());
+
+    struct Field {
+        label: &'static str,
+        value: String,
+        hint: &'static str,
+    }
+    let fields = [
+        Field {
+            label: " Obfuscate",
+            value: obf_str.to_string(),
+            hint: "←→ cycle",
+        },
+        Field {
+            label: " PAR2 %  ",
+            value: par2_str,
+            hint: "←→ or Enter",
+        },
+        Field {
+            label: " Verify  ",
+            value: verify_str.to_string(),
+            hint: "←→ toggle",
+        },
+        Field {
+            label: " Password",
+            value: pw_display,
+            hint: "Enter edit  Tab show",
+        },
+        Field {
+            label: " Groups  ",
+            value: groups_str,
+            hint: "Enter edit",
+        },
+    ];
+
+    let field_area = vchunks[2];
+    let header = Line::from(Span::styled(
+        " Settings  (j/k navigate · Enter/e edit · ←→ cycle)",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let mut field_lines: Vec<Line> = vec![header, Line::from("")];
+
+    for (i, field) in fields.iter().enumerate() {
+        let is_sel = app.confirm_field == i;
+        let is_editing = is_sel && app.confirm_editing;
+
+        let cursor = if is_sel {
+            Span::styled("▶", Style::default().fg(Color::Yellow))
+        } else {
+            Span::raw(" ")
+        };
+
+        let label_style = if is_sel {
             Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    let inner_rect = inner.inner(modal_rect);
-    f.render_widget(inner, modal_rect);
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
-    // Build content lines
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        "  Files to upload:",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))];
+        let value_display = if is_editing {
+            format!("{}_", app.confirm_edit_buf)
+        } else {
+            field.value.clone()
+        };
 
-    for item in queue.iter().take(8) {
-        let name = std::path::Path::new(item)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(item);
-        lines.push(Line::from(Span::styled(
-            format!("    • {}", name),
-            Style::default().fg(Color::White),
-        )));
-    }
-    if queue.len() > 8 {
-        lines.push(Line::from(Span::styled(
-            format!("    … and {} more", queue.len() - 8),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
+        let value_style = if is_editing {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else if is_sel {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  Settings:  (j/k: nav  ←/→ Space: edit)",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
+        let hint_style = Style::default().fg(Color::DarkGray);
 
-    let key_style = Style::default().fg(Color::DarkGray);
-    let val_style = Style::default().fg(Color::Yellow);
-    let sel_key_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let sel_val_style = Style::default()
-        .fg(Color::Green)
-        .add_modifier(Modifier::BOLD);
-    let edit_hint_style = Style::default().fg(Color::DarkGray);
-
-    // Read-only settings (no cursor)
-    let readonly = [
-        (
-            "  Server   ",
-            app.pesto_config
-                .as_ref()
-                .map(|c| format!("{}:{}", c.host, c.port))
-                .unwrap_or_else(|| "dry-run".to_string()),
-        ),
-        ("  Groups   ", s.groups.clone()),
-        ("  From     ", s.from.clone()),
-        ("  Compress ", s.compression.clone()),
-    ];
-    for (key, val) in &readonly {
-        lines.push(Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(key.to_string(), key_style),
-            Span::styled(": ", key_style),
-            Span::styled(val.clone(), val_style),
+        field_lines.push(Line::from(vec![
+            cursor,
+            Span::styled(format!("{:<10}", field.label), label_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(value_display, value_style),
+            if is_sel && !is_editing {
+                Span::styled(format!("  {}", field.hint), hint_style)
+            } else {
+                Span::raw("")
+            },
         ]));
     }
 
-    // Editable settings with cursor indicator
-    // field 0 = obfuscate, 1 = par2, 2 = verify
-    let editable = [
-        ("  Obfuscate", s.obfuscate.clone(), 0usize),
-        ("  PAR2     ", s.par2.clone(), 1usize),
-        ("  Verify   ", s.verify.clone(), 2usize),
-    ];
-    for (key, val, field_idx) in &editable {
-        let is_selected = app.confirm_field == *field_idx;
-        let cursor = if is_selected { "▶ " } else { "  " };
-        let hint = if is_selected { "  ←/→ Space" } else { "" };
-        lines.push(Line::from(vec![
-            Span::styled(cursor, Style::default().fg(Color::Green)),
-            Span::styled(
-                key.to_string(),
-                if is_selected {
-                    sel_key_style
-                } else {
-                    key_style
-                },
-            ),
-            Span::styled(
-                ": ",
-                if is_selected {
-                    sel_key_style
-                } else {
-                    key_style
-                },
-            ),
-            Span::styled(
-                val.clone(),
-                if is_selected {
-                    sel_val_style
-                } else {
-                    val_style
-                },
-            ),
-            Span::styled(hint.to_string(), edit_hint_style),
-        ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
+    f.render_widget(ratatui::widgets::Paragraph::new(field_lines), field_area);
+
+    // ── Bottom hint line ────────────────────────────────────────────────────
+    let hint = Line::from(vec![
         Span::styled(
-            "  To change settings: ",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("Esc → Config tab", Style::default().fg(Color::Cyan)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  [ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "Enter / y",
+            " y",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " ] Start upload    [ ",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("Esc / n", Style::default().fg(Color::Red)),
-        Span::styled(" ] Cancel", Style::default().fg(Color::DarkGray)),
-    ]));
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, inner_rect);
+        Span::styled(" start upload  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Red)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(ratatui::widgets::Paragraph::new(hint), vchunks[3]);
 }
 
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
@@ -929,13 +1011,17 @@ fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.show_upload_confirm {
-        let help = "Enter/y: confirm upload   •   Esc/n: cancel";
+        let help = if app.confirm_editing {
+            "Enter: confirm  •  Esc: cancel edit  •  Tab: toggle password visibility"
+        } else {
+            "j/k: navigate  •  Enter/←→: edit field  •  y: start upload  •  Esc: cancel"
+        };
         let status = Paragraph::new(help)
             .style(Style::default().fg(Color::Yellow))
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .title(" Confirm Upload "),
+                    .title(" Upload Config "),
             );
         f.render_widget(status, area);
         return;
