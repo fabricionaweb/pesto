@@ -564,17 +564,26 @@ pesto --dry-run --nfo movie.mkv   # generate NFO without touching the network
 The [`examples/hooks/`](examples/hooks/) directory contains ready-to-use hook
 scripts:
 
-| Script | Description |
-|--------|-------------|
-| [`print-vars.sh`](examples/hooks/print-vars.sh) | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
-| [`curupira.sh`](examples/hooks/curupira.sh) | Uploads the `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via its REST API |
+| Script | Platform | Description |
+|--------|----------|-------------|
+| [`print-vars.sh`](examples/hooks/print-vars.sh) | Unix | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
+| [`curupira.sh`](examples/hooks/curupira.sh) | Unix | Uploads the `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via its REST API |
+| [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
+| [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Windows | Same as above — `.bat` version for `cmd.exe` |
+| [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
 
-To install a hook:
+To install a hook on Unix:
 
 ```bash
 cp examples/hooks/curupira.sh ~/.config/pesto/hooks/
 chmod +x ~/.config/pesto/hooks/curupira.sh
 # edit API_KEY inside the file
+```
+
+To install a hook on Windows, copy the `.bat` or `.ps1` file to `%APPDATA%\pesto\hooks\` and edit the variables at the top of the file. For the PowerShell version, set `post_hook` in `config.toml`:
+
+```toml
+post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\\generic-indexer.ps1\""
 ```
 
 ---
