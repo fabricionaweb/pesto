@@ -36,6 +36,10 @@ pub struct FileTree {
     pub nzb_status: HashMap<String, NzbStatusEntry>,
     /// Names of files currently being uploaded (basename).
     pub uploading: HashSet<String>,
+    /// First visible item index — managed manually to get correct scroll behaviour.
+    scroll_offset: usize,
+    /// Number of items that fit in the last rendered area; updated at render time.
+    visible_height: usize,
 }
 
 impl FileTree {
@@ -48,6 +52,8 @@ impl FileTree {
             marked: HashSet::new(),
             nzb_status: HashMap::new(),
             uploading: HashSet::new(),
+            scroll_offset: 0,
+            visible_height: 20,
         };
         tree.refresh();
         tree
@@ -64,18 +70,40 @@ impl FileTree {
     }
 
     pub fn select_next(&mut self) {
-        if !self.items.is_empty() {
-            self.selected = (self.selected + 1) % self.items.len();
+        if self.items.is_empty() {
+            return;
+        }
+        if self.selected + 1 >= self.items.len() {
+            // Wrap to top.
+            self.selected = 0;
+            self.scroll_offset = 0;
+        } else {
+            self.selected += 1;
+            // Scroll only when cursor leaves the visible area.
+            let bottom = self.scroll_offset + self.visible_height;
+            if self.selected >= bottom {
+                self.scroll_offset = self.selected + 1 - self.visible_height;
+            }
         }
     }
 
     pub fn select_previous(&mut self) {
-        if !self.items.is_empty() {
-            self.selected = if self.selected == 0 {
-                self.items.len() - 1
-            } else {
-                self.selected - 1
-            };
+        if self.items.is_empty() {
+            return;
+        }
+        if self.selected == 0 {
+            // Wrap to bottom.
+            self.selected = self.items.len() - 1;
+            self.scroll_offset = self
+                .items
+                .len()
+                .saturating_sub(self.visible_height);
+        } else {
+            self.selected -= 1;
+            // Scroll only when cursor leaves the visible area.
+            if self.selected < self.scroll_offset {
+                self.scroll_offset = self.selected;
+            }
         }
     }
 
@@ -166,6 +194,7 @@ impl FileTree {
             self.items = items;
             if self.selected >= self.items.len() {
                 self.selected = 0;
+                self.scroll_offset = 0;
             }
         }
     }
@@ -175,6 +204,7 @@ impl FileTree {
             self.current_dir = parent.to_path_buf();
             self.refresh();
             self.selected = 0;
+            self.scroll_offset = 0;
         }
     }
 
@@ -184,7 +214,9 @@ impl FileTree {
     }
 
     /// Render this FileTree into the given area.
-    pub fn render(&self, f: &mut Frame, area: Rect, focused: bool) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, focused: bool) {
+        // Keep visible_height in sync so navigation knows how many rows fit.
+        self.visible_height = (area.height as usize).saturating_sub(2).max(1);
         let items: Vec<ListItem> = self
             .items
             .iter()
@@ -287,6 +319,7 @@ impl FileTree {
 
         let mut state = ListState::default();
         state.select(Some(self.selected));
+        *state.offset_mut() = self.scroll_offset;
 
         f.render_stateful_widget(list, area, &mut state);
     }

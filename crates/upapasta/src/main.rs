@@ -38,6 +38,7 @@ async fn main() -> io::Result<()> {
     let mut app = tokio::task::spawn_blocking(App::new)
         .await
         .expect("App::new panicked");
+    app.load_upload_prefs();
 
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -155,6 +156,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     _ if app.show_upload_confirm => match key.code {
                         // y or Ctrl+Enter = start upload
                         KeyCode::Char('y') => {
+                            app.save_upload_prefs();
                             app.confirm_close();
                             app.state = app::AppState::Dashboard;
                             handle_upload_trigger(app, tx.clone());

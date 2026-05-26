@@ -379,7 +379,7 @@ pub struct HistoryState {
 
 /// Per-session upload overrides set via the Config screen.
 /// None = use the value from the loaded pesto config (or built-in default).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionOverrides {
     pub from: Option<String>,
     /// Comma-separated newsgroup list.
@@ -1401,6 +1401,52 @@ impl App {
         self.confirm_editing = false;
         self.confirm_edit_buf.clear();
     }
+
+    /// Persist current session overrides to disk so they are pre-filled next time.
+    pub fn save_upload_prefs(&self) {
+        if let Some(path) = upload_prefs_path() {
+            if let Ok(json) = serde_json::to_string_pretty(&self.config_state.overrides) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    /// Load previously saved session overrides and merge them into config_state.
+    /// Values already set (e.g. from the pesto config) are not overwritten.
+    pub fn load_upload_prefs(&mut self) {
+        let Some(path) = upload_prefs_path() else {
+            return;
+        };
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if let Ok(prefs) = serde_json::from_str::<SessionOverrides>(&data) {
+            let o = &mut self.config_state.overrides;
+            if o.obfuscate.is_none() {
+                o.obfuscate = prefs.obfuscate;
+            }
+            if o.par2.is_none() {
+                o.par2 = prefs.par2;
+            }
+            if o.verify.is_none() {
+                o.verify = prefs.verify;
+            }
+            if o.nzb_password.is_none() {
+                o.nzb_password = prefs.nzb_password;
+            }
+            if o.groups.is_none() {
+                o.groups = prefs.groups;
+            }
+            if o.compress_password.is_none() {
+                o.compress_password = prefs.compress_password;
+            }
+        }
+    }
+}
+
+/// Path to the upload preferences file.
+fn upload_prefs_path() -> Option<PathBuf> {
+    pesto::config::config_dir().map(|d| d.join("upapasta-prefs.json"))
 }
 
 /// Expand a leading `~` to the user's home directory.
