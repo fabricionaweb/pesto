@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-05-25
+
+### Fixed
+- `--nfo` now generates the `.nfo` file unconditionally — it no longer
+  requires a successful upload. The flag works correctly with `--dry-run`,
+  `--no-upload`, and when the upload fails or is cancelled. NFO is a local
+  artifact (reads files, runs `mediainfo`) and has no network dependency.
+- `mediainfo` failures now produce an actionable message: the error includes
+  whether the binary was not found in `PATH` or exited with a non-zero status
+  and its stderr output. Previously the failure was silent.
+
+### Changed
+- `nfo.rs` gains `tracing` instrumentation (`debug`/`warn`/`info`) throughout
+  `generate()`, `generate_season()`, `write()` and `run_mediainfo()`, making
+  NFO decisions visible under `--verbose`.
+
 ## [0.3.1] — 2026-05-24
 
 ### Added
