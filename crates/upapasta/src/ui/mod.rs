@@ -1905,14 +1905,30 @@ fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
             .entries
             .iter()
             .map(|e| {
+                use crate::app::NzbOrigin;
                 let catalog_marker = if e.in_catalog { "✓" } else { "·" };
                 let catalog_style = if e.in_catalog {
                     Style::default().fg(Color::Green)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
+                let (origin_sym, origin_style) = match e.origin {
+                    NzbOrigin::Uploaded => (
+                        "↑",
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    NzbOrigin::Downloaded => (
+                        "↓",
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    NzbOrigin::Manual => (
+                        "m",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                };
                 let size_str = format_bytes(e.file_size);
-                let name_width = chunks[0].width.saturating_sub(16) as usize;
+                // Reserve space for: " ✓ ↑ " (5) + "  123.4 KB" (11) = 16 cols
+                let name_width = chunks[0].width.saturating_sub(18) as usize;
                 let name = if e.name.len() > name_width {
                     format!("{}…", &e.name[..name_width.saturating_sub(1)])
                 } else {
@@ -1920,6 +1936,7 @@ fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", catalog_marker), catalog_style),
+                    Span::styled(format!("{} ", origin_sym), origin_style),
                     Span::raw(name),
                     Span::styled(
                         format!("  {:>9}", size_str),

@@ -223,6 +223,20 @@ pub struct VaultEntry {
     pub contents: Option<NzbContents>,
     /// Whether this NZB appears in the catalog.
     pub in_catalog: bool,
+    /// Where this NZB came from.
+    pub origin: NzbOrigin,
+}
+
+/// Where a vault NZB file originated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NzbOrigin {
+    /// Created by an upapasta upload (`nzb_dir/uploaded/`).
+    Uploaded,
+    /// Downloaded from a Prowlarr/indexer search (`nzb_dir/downloaded/`).
+    Downloaded,
+    /// Added manually by the user (root of `nzb_dir`).
+    #[default]
+    Manual,
 }
 
 /// Sort order for the NZB Vault list.
@@ -534,6 +548,11 @@ impl App {
     }
 
     /// Load (or reload) the NZB Vault from the configured nzb_dir.
+    ///
+    /// Scans three locations within `nzb_dir`:
+    /// - `uploaded/`   — NZBs created by upapasta uploads
+    /// - `downloaded/` — NZBs fetched from Prowlarr/indexers
+    /// - root          — NZBs added manually by the user
     pub fn load_vault(&mut self) {
         let nzb_dir = self
             .pesto_config
@@ -547,16 +566,13 @@ impl App {
             return;
         };
 
-        self.vault.load_error = None;
+        if !dir.is_dir() {
+            self.vault.entries.clear();
+            self.vault.load_error = Some(format!("{}: directory not found", dir.display()));
+            return;
+        }
 
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(d) => d,
-            Err(e) => {
-                self.vault.entries.clear();
-                self.vault.load_error = Some(format!("{}: {}", dir.display(), e));
-                return;
-            }
-        };
+        self.vault.load_error = None;
 
         // Collect catalog NZB paths for cross-reference
         let catalog_paths: std::collections::HashSet<String> = if let Some(ref cat) = self.catalog {
@@ -568,22 +584,35 @@ impl App {
             std::collections::HashSet::new()
         };
 
-        let mut entries: Vec<VaultEntry> = read_dir
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
+        let uploaded_dir = dir.join("uploaded");
+        let downloaded_dir = dir.join("downloaded");
+        let scan_dirs: &[(&std::path::Path, NzbOrigin)] = &[
+            (&dir, NzbOrigin::Manual),
+            (&uploaded_dir, NzbOrigin::Uploaded),
+            (&downloaded_dir, NzbOrigin::Downloaded),
+        ];
+
+        let mut entries: Vec<VaultEntry> = Vec::new();
+
+        for (scan_dir, origin) in scan_dirs {
+            let Ok(read_dir) = std::fs::read_dir(scan_dir) else {
+                continue;
+            };
+            for entry in read_dir.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path
                     .extension()
                     .map(|x| x.eq_ignore_ascii_case("nzb"))
                     .unwrap_or(false)
-            })
-            .map(|e| {
-                let path = e.path();
+                {
+                    continue;
+                }
                 let name = path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let meta = e.metadata().ok();
+                let meta = entry.metadata().ok();
                 let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = meta
                     .and_then(|m| m.modified().ok())
@@ -591,16 +620,17 @@ impl App {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let in_catalog = catalog_paths.contains(&path.to_string_lossy().to_string());
-                VaultEntry {
+                entries.push(VaultEntry {
                     path,
                     name,
                     file_size,
                     modified,
                     contents: None,
                     in_catalog,
-                }
-            })
-            .collect();
+                    origin: *origin,
+                });
+            }
+        }
 
         // Apply current sort
         match self.vault.sort {
