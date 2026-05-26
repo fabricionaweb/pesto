@@ -28,6 +28,7 @@ pub mod article;
 pub mod compress;
 pub mod config;
 pub mod history;
+pub mod hooks;
 pub mod indexer;
 pub mod logging;
 pub mod nfo;
@@ -39,6 +40,7 @@ pub mod poster;
 pub mod progress;
 pub mod resume;
 pub mod ui;
+pub mod upload;
 pub mod walk;
 pub mod yenc;
 

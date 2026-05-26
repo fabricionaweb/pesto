@@ -8,10 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use pesto::{
-    config::{Config, ObfuscateMode},
-    walk::InputFile,
-};
+use pesto::config::{Config, ObfuscateMode};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 mod app;
 mod catalog;
 mod events;
-mod hooks;
 mod nzb_viewer;
 mod prowlarr;
 mod ui;
@@ -36,7 +32,12 @@ async fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    // App::new() opens the SQLite catalog, imports legacy JSONL, and queries
+    // history — all blocking I/O. Run it on the blocking thread pool so the
+    // async runtime (and therefore the terminal) stays responsive.
+    let mut app = tokio::task::spawn_blocking(App::new)
+        .await
+        .expect("App::new panicked");
 
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -569,7 +570,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                 }
                 AppEvent::Tick => {
-                    // could do animations, throughput calc, etc. here later
+                    app.tick_count = app.tick_count.wrapping_add(1);
                 }
                 _ => {}
             }
@@ -705,18 +706,16 @@ fn trigger_prowlarr_download(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>)
 }
 
 /// Called when the user presses 'u' on the Dashboard.
-/// Starts a real (dry-run) upload using pesto::post() and streams progress.
+/// Delegates the full upload pipeline to `pesto::upload::run_upload`, which
+/// handles compression, posting, NZB writing, history, indexer, and hooks.
 fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     app.trigger_upload();
 
-    // Snapshot the files currently in the queue
-    let files: Vec<PathBuf> = app.upload_queue.items.iter().map(PathBuf::from).collect();
-
-    if files.is_empty() {
+    let entry_paths: Vec<PathBuf> = app.upload_queue.items.iter().map(PathBuf::from).collect();
+    if entry_paths.is_empty() {
         return;
     }
 
-    // Use real config (with session overrides applied) or fall back to dry-run
     let config = if let Some(mut real_cfg) = app.effective_config_with_overrides() {
         real_cfg.dry_run = false;
         real_cfg
@@ -724,56 +723,23 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         build_dry_run_config()
     };
 
-    // Collect file names for the hook context (display names, not full paths)
-    let queue_names: Vec<String> = files
-        .iter()
-        .filter_map(|p| p.file_name())
+    let label = entry_paths
+        .first()
+        .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
-        .collect();
+        .unwrap_or_else(|| "upload".to_string());
 
-    // Expand directories recursively into individual InputFiles
-    let input_files = match pesto::walk::expand_inputs(&files) {
-        Ok(v) => v,
-        Err(e) => {
-            app.log_panel
-                .push_error(format!("ERROR expanding inputs: {}", e));
-            app.status_bar.set("Input error — see logs");
-            app.upload_in_progress = false;
-            return;
-        }
-    };
-
-    // Token is already created and stored in app.current_cancel_token by trigger_upload
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
 
-    // Spawn the actual upload task
     tokio::spawn(async move {
-        let tx2 = tx.clone();
-        let result = run_real_upload(config.clone(), input_files, tx.clone(), cancel_token).await;
-
+        let result = run_real_upload(config, entry_paths, label, tx.clone(), cancel_token).await;
         let success = result.is_ok();
-        let cancelled = result.as_ref().is_ok_and(|r| r.cancelled);
-
-        // Run post-upload hooks on successful, non-cancelled upload
-        if success && !cancelled {
-            let total_bytes = result.as_ref().map(|r| r.total_bytes).unwrap_or(0);
-            let ctx = hooks::HookContext::from_config(&config, &queue_names, total_bytes, None);
-            let hook_cfg = config.clone();
-            let log_lines = tokio::task::spawn_blocking(move || hooks::run_hooks(&hook_cfg, &ctx))
-                .await
-                .unwrap_or_else(|e| vec![format!("hook task error: {e}")]);
-            for line in log_lines {
-                let _ = tx2.send(AppEvent::Progress(format!("[hook] {}", line)));
-            }
-        }
-
+        let cancelled = result.as_ref().map(|o| o.cancelled).unwrap_or(false);
         if let Err(ref e) = result {
-            if !e.is_cancelled() {
-                let _ = tx2.send(AppEvent::UploadError(e.to_string()));
-            }
+            let _ = tx.send(AppEvent::UploadError(e.to_string()));
         }
-        let _ = tx2.send(AppEvent::UploadFinished {
-            success: success && result.is_ok(),
+        let _ = tx.send(AppEvent::UploadFinished {
+            success: success && !cancelled,
             cancelled,
         });
     });
@@ -838,42 +804,45 @@ fn build_dry_run_config() -> Config {
     }
 }
 
-/// The actual async upload worker. Forwards every ProgressEvent into the UI in real time.
-/// Supports cancellation via CancellationToken (bridged to pesto's AtomicBool).
+/// Runs the full upload pipeline via `pesto::upload::run_upload` and streams
+/// `ProgressEvent`s to the TUI in real time.
+///
+/// NZB writing, history recording, indexer upload, notifications, and
+/// post-upload hooks are all handled inside `run_upload`; the TUI receives
+/// them as `Status` events on the same channel.
 async fn run_real_upload(
     config: Config,
-    files: Vec<InputFile>,
+    entry_paths: Vec<PathBuf>,
+    label: String,
     tx: mpsc::UnboundedSender<AppEvent>,
     cancel_token: CancellationToken,
-) -> Result<UploadResult, UploadError> {
-    // Bridge: spawn a task that sets the AtomicBool when the token fires.
+) -> anyhow::Result<pesto::upload::UploadOutcome> {
+    // Bridge CancellationToken → AtomicBool (pesto's cancel mechanism).
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
         let flag = cancel_flag.clone();
-        let token = cancel_token.clone();
         tokio::spawn(async move {
-            token.cancelled().await;
+            cancel_token.cancelled().await;
             flag.store(true, Ordering::Relaxed);
         });
     }
 
-    // Create our own progress channel so we can drain events in real time
-    // while the poster runs concurrently (pesto::post_cancelable awaits completion
-    // before returning, so all events would arrive only after the upload finishes).
     let (prog_tx, mut prog_rx) =
         tokio::sync::mpsc::unbounded_channel::<pesto::progress::ProgressEvent>();
 
-    // Spawn the poster as a concurrent task
-    let cfg2 = config.clone();
-    let files2 = files.clone();
-    let cf2 = cancel_flag.clone();
+    // Spawn the full pipeline as a concurrent task so we can drain events live.
+    let cfg = config.clone();
+    let paths = entry_paths.clone();
+    let lbl = label.clone();
     let upload_handle = tokio::spawn(async move {
-        pesto::poster::post_files_with_progress_and_cancel(
-            &cfg2,
-            &files2,
+        pesto::upload::run_upload(
+            &cfg,
+            &paths,
+            &lbl,
             Some(prog_tx),
+            Some(cancel_flag),
             None,
-            Some(cf2),
+            true,
         )
         .await
     });
@@ -890,19 +859,16 @@ async fn run_real_upload(
         par2_slices: None,
     };
 
-    // Drain progress events as they arrive (real-time, not post-hoc).
-    //
-    // select! races the upload task against the event channel so that if the
-    // task exits without emitting Finished (panic, early return) we still
-    // unblock. When a terminal event (Finished/Interrupted/Failed) arrives on
-    // the channel we disable the event arm; the task arm fires on the next
-    // iteration and we collect the PostOutcome.
+    // select! races the pipeline task against the progress channel.
+    // After a terminal event (Finished/Interrupted/Failed) we disable the
+    // channel arm; the task arm fires next and we collect the outcome.
+    // Any events buffered after Finished (NZB written, hook lines) are drained
+    // via try_recv when the task arm fires.
     tokio::pin!(upload_handle);
     let mut events_done = false;
 
     let outcome = loop {
         tokio::select! {
-            // Upload task completed — drain any buffered events then stop.
             result = &mut upload_handle => {
                 while let Ok(event) = prog_rx.try_recv() {
                     let msg = format_progress_event(&event);
@@ -916,14 +882,12 @@ async fn run_real_upload(
                 }
                 break match result {
                     Ok(Ok(o)) => o,
-                    Ok(Err(e)) => return Err(UploadError::Pesto(e.to_string())),
-                    Err(e) => return Err(UploadError::Pesto(format!("upload task panicked: {e}"))),
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => return Err(anyhow::anyhow!("upload task panicked: {e}")),
                 };
             }
-            // Progress event — forward to UI (disabled once terminal event seen).
             event = prog_rx.recv(), if !events_done => {
                 let Some(event) = event else {
-                    // Channel closed without Finished — let the task arm resolve.
                     events_done = true;
                     continue;
                 };
@@ -935,7 +899,6 @@ async fn run_real_upload(
                     last_update = update.clone();
                     let _ = tx.send(AppEvent::ProgressUpdate(update));
                 }
-                // On any terminal event, disable this arm so the task arm fires next.
                 if matches!(
                     event,
                     pesto::progress::ProgressEvent::Finished
@@ -949,42 +912,12 @@ async fn run_real_upload(
     };
 
     let _ = tx.send(AppEvent::Progress(format!(
-        "PostOutcome: {} segments, {} failures",
+        "PostOutcome: {} segments, failures: {}",
         outcome.segments.len(),
-        outcome.failures.len()
+        outcome.had_failures,
     )));
 
-    let cancelled = outcome.cancelled;
-    let total_bytes = last_update.total_bytes;
-    Ok(UploadResult {
-        cancelled,
-        total_bytes,
-    })
-}
-
-#[derive(Debug)]
-struct UploadResult {
-    cancelled: bool,
-    total_bytes: u64,
-}
-
-#[derive(Debug)]
-enum UploadError {
-    Pesto(String),
-}
-
-impl UploadError {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
-
-impl std::fmt::Display for UploadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UploadError::Pesto(s) => write!(f, "{}", s),
-        }
-    }
+    Ok(outcome)
 }
 
 /// Convert rich pesto ProgressEvent into a single-line string for the log.
@@ -1009,7 +942,7 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
             format!("Segment FAILED — {}", file)
         }
         E::SegmentDone { .. } => String::new(), // shown in gauge, not logs
-        E::Status { text } if !text.is_empty() => format!("Status: {}", text),
+        E::Status { text } if !text.is_empty() => text.clone(),
         E::QueueExtended { file, segments, .. } => {
             format!("PAR2 extended queue: {} (+{} segments)", file, segments)
         }
