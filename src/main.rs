@@ -877,38 +877,42 @@ async fn run_single_upload(
         .await;
     }
 
-    // Generate .nfo and run post-upload hook when the upload succeeded.
-    let upload_ok = !outcome.cancelled && outcome.failures.is_empty();
-    if upload_ok && !config.par2_only && !config.dry_run {
-        // Derive the .nfo path next to the .nzb (or next to the source).
-        let nfo_path: Option<PathBuf> = if config.nfo {
-            let base = out.as_ref().map(|p| p.with_extension("nfo")).or_else(|| {
-                entry_paths
-                    .first()
-                    .and_then(|p| p.parent())
-                    .map(|d| d.join(format!("{entry_label}.nfo")))
-            });
-            if let Some(ref nfo_out) = base {
-                match pesto::nfo::generate(entry_paths) {
-                    Some(content) => match pesto::nfo::write(nfo_out, &content) {
-                        Ok(()) => {
-                            println!("wrote nfo:  {}", nfo_out.display());
-                            Some(nfo_out.clone())
-                        }
-                        Err(e) => {
-                            eprintln!("nfo write failed: {e}");
-                            None
-                        }
-                    },
-                    None => None,
+    // Generate .nfo unconditionally — it is a local artifact and does not
+    // depend on a live NNTP connection, --dry-run, or --no-upload.
+    let nfo_path: Option<PathBuf> = if config.nfo && !config.par2_only {
+        let base = out.as_ref().map(|p| p.with_extension("nfo")).or_else(|| {
+            entry_paths
+                .first()
+                .and_then(|p| p.parent())
+                .map(|d| d.join(format!("{entry_label}.nfo")))
+        });
+        if let Some(ref nfo_out) = base {
+            match pesto::nfo::generate(entry_paths) {
+                Some(content) => match pesto::nfo::write(nfo_out, &content) {
+                    Ok(()) => {
+                        println!("wrote nfo:  {}", nfo_out.display());
+                        Some(nfo_out.clone())
+                    }
+                    Err(e) => {
+                        eprintln!("nfo write failed: {e}");
+                        None
+                    }
+                },
+                None => {
+                    eprintln!("nfo: no content generated for the given paths");
+                    None
                 }
-            } else {
-                None
             }
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
+    // Run post-upload hooks only when the upload actually succeeded.
+    let upload_ok = !outcome.cancelled && outcome.failures.is_empty();
+    if upload_ok && !config.par2_only && !config.dry_run {
         let hook_env = HookEnv {
             nzb_path: out.as_deref(),
             nfo_path: nfo_path.as_deref(),

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use tracing::{debug, info, warn};
+
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "avi", "m4v", "mov", "wmv", "flv", "ts", "m2ts", "vob", "divx", "xvid",
 ];
@@ -22,14 +24,21 @@ const MAX_FILENAME_LEN: usize = 42;
 /// no paths.
 pub fn generate(paths: &[PathBuf]) -> Option<String> {
     if paths.is_empty() {
+        debug!("nfo::generate called with no paths — skipping");
         return None;
     }
+
+    debug!(paths = paths.len(), "generating NFO");
 
     // Single file: mediainfo if video, plain listing otherwise.
     if paths.len() == 1 && paths[0].is_file() {
         if is_video(&paths[0]) {
-            if let Ok(out) = run_mediainfo(&paths[0]) {
-                return Some(out);
+            debug!(path = %paths[0].display(), "running mediainfo on single video file");
+            match run_mediainfo(&paths[0]) {
+                Ok(out) => return Some(out),
+                Err(e) => {
+                    warn!(path = %paths[0].display(), error = %e, "mediainfo failed; falling back to listing")
+                }
             }
         }
         return Some(build_listing(paths));
@@ -44,10 +53,17 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             .unwrap_or_default();
 
         if is_series_folder(&folder_name) {
+            debug!(folder = %folder_name, "detected series folder — looking for first video");
             if let Some(first_ep) = find_first_video(dir) {
-                if let Ok(out) = run_mediainfo(&first_ep) {
-                    return Some(out);
+                debug!(episode = %first_ep.display(), "running mediainfo on first episode");
+                match run_mediainfo(&first_ep) {
+                    Ok(out) => return Some(out),
+                    Err(e) => {
+                        warn!(episode = %first_ep.display(), error = %e, "mediainfo failed; falling back to folder NFO")
+                    }
                 }
+            } else {
+                debug!("no video file found in series folder; using folder NFO");
             }
         }
 
@@ -55,6 +71,7 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
     }
 
     // Multiple paths: fall back to plain listing.
+    debug!("multiple paths — using plain listing");
     Some(build_listing(paths))
 }
 
@@ -65,8 +82,12 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
 /// is found or `mediainfo` fails.
 pub fn generate_season(dirs: &[PathBuf]) -> Option<String> {
     if dirs.is_empty() {
+        debug!("nfo::generate_season called with no dirs — skipping");
         return None;
     }
+
+    debug!(dirs = dirs.len(), "generating season NFO");
+
     // Collect all directories, sorted, so episode order is stable.
     let mut sorted_dirs: Vec<&PathBuf> = dirs.iter().collect();
     sorted_dirs.sort();
@@ -79,17 +100,23 @@ pub fn generate_season(dirs: &[PathBuf]) -> Option<String> {
             None
         };
         if let Some(video) = first {
-            if let Ok(out) = run_mediainfo(&video) {
-                return Some(out);
+            debug!(video = %video.display(), "running mediainfo for season NFO");
+            match run_mediainfo(&video) {
+                Ok(out) => return Some(out),
+                Err(e) => {
+                    warn!(video = %video.display(), error = %e, "mediainfo failed for season entry")
+                }
             }
         }
     }
     // Fallback: plain listing.
+    debug!("mediainfo unavailable for all season entries; falling back to listing");
     generate(dirs)
 }
 
 /// Write the NFO content to `path`, creating or overwriting it.
 pub fn write(path: &Path, content: &str) -> std::io::Result<()> {
+    debug!(path = %path.display(), bytes = content.len(), "writing NFO");
     std::fs::write(path, content.as_bytes())
 }
 
@@ -148,11 +175,31 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn run_mediainfo(path: &Path) -> std::io::Result<String> {
-    let output = std::process::Command::new("mediainfo").arg(path).output()?;
+    let output = std::process::Command::new("mediainfo")
+        .arg(path)
+        .output()
+        .map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("could not launch mediainfo (is it installed and in PATH?): {e}"),
+            )
+        })?;
     if !output.status.success() {
-        return Err(std::io::Error::other("mediainfo exited non-zero"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            format!("mediainfo exited with status {}", output.status)
+        } else {
+            format!(
+                "mediainfo exited with status {}: {}",
+                output.status,
+                stderr.trim()
+            )
+        };
+        return Err(std::io::Error::other(msg));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let result = String::from_utf8_lossy(&output.stdout).into_owned();
+    info!(path = %path.display(), lines = result.lines().count(), "mediainfo succeeded");
+    Ok(result)
 }
 
 fn format_size(bytes: u64) -> String {
