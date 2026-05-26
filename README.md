@@ -551,8 +551,12 @@ Pass `--nfo` to generate a `.nfo` text file alongside the `.nzb`. pesto runs
 to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
 hook script.
 
+NFO generation is a local operation — it works with `--dry-run` and
+`--no-upload` just as it does in a full upload run.
+
 ```bash
 pesto --nfo movie.mkv
+pesto --dry-run --nfo movie.mkv   # generate NFO without touching the network
 ```
 
 ### Bundled examples
