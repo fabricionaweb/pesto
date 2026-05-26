@@ -203,6 +203,40 @@ pub async fn run_upload(
 
     let had_failures = !outcome.failures.is_empty();
 
+    // ── Post-check STAT pass ──────────────────────────────────────────────────
+    if config.check
+        && !config.dry_run
+        && !config.par2_only
+        && !outcome.cancelled
+        && !outcome.segments.is_empty()
+    {
+        emit_status(
+            &progress_tx,
+            format!("checking {} article(s) via STAT…", outcome.segments.len()),
+        );
+        match crate::poster::check_articles(config, &outcome.segments, progress_tx.as_ref()).await {
+            Ok(missing) if missing.is_empty() => {
+                emit_status(
+                    &progress_tx,
+                    format!("check: all {} article(s) verified", outcome.segments.len()),
+                );
+            }
+            Ok(missing) => {
+                emit_status(
+                    &progress_tx,
+                    format!("check: {} article(s) not found on server", missing.len()),
+                );
+                for id in &missing {
+                    emit_status(&progress_tx, format!("  missing: {id}"));
+                }
+            }
+            Err(e) => {
+                emit_status(&progress_tx, format!("check: STAT pass error: {e:#}"));
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // ── Write NZB ────────────────────────────────────────────────────────────
     let nzb_path: Option<PathBuf> = if outcome.cancelled
         || outcome.segments.is_empty()

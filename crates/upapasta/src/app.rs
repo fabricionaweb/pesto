@@ -162,6 +162,8 @@ pub struct App {
     pub state: AppState,
     pub file_tree: FileTree,
     pub upload_queue: UploadQueue,
+    /// Incremented on every Tick event — drives spinner animations in the UI.
+    pub tick_count: u64,
     pub log_panel: LogPanel,
     pub status_bar: StatusBar,
     pub upload_in_progress: bool,
@@ -441,6 +443,7 @@ impl App {
             state: AppState::Browser,
             file_tree: FileTree::new(),
             upload_queue: UploadQueue::new(),
+            tick_count: 0,
             log_panel: LogPanel::new(80),
             status_bar: StatusBar::new(status_msg),
             upload_in_progress: false,
@@ -536,7 +539,7 @@ impl App {
             .pesto_config
             .as_ref()
             .and_then(|c| c.nzb_dir.as_deref())
-            .map(PathBuf::from);
+            .map(expand_tilde);
 
         let Some(dir) = nzb_dir else {
             self.vault.entries.clear();
@@ -1398,6 +1401,25 @@ impl App {
         self.confirm_editing = false;
         self.confirm_edit_buf.clear();
     }
+}
+
+/// Expand a leading `~` to the user's home directory.
+/// Paths without `~` are returned as-is.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    let home = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()));
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(h) = home {
+            return h.join(rest);
+        }
+    } else if path == "~" {
+        if let Some(h) = home {
+            return h;
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Try to load pesto configuration from the standard location.

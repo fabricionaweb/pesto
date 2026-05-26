@@ -842,6 +842,9 @@ fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
     let par2_done = p.par2_total_slices > 0 && p.par2_done_slices >= p.par2_total_slices;
     let par2_active = p.par2_total_slices > 0 && !par2_done;
 
+    const SPINNER: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+    let spin = SPINNER[(app.tick_count / 2) as usize % SPINNER.len()];
+
     let (pct, label, style) = if p.par2_total_slices == 0 {
         (
             0u16,
@@ -860,8 +863,8 @@ fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
         (
             pct,
             format!(
-                "{}%  {}/{} slices",
-                pct, p.par2_done_slices, p.par2_total_slices
+                "{} {}%  {}/{} slices",
+                spin, pct, p.par2_done_slices, p.par2_total_slices
             ),
             Style::default().fg(Color::Yellow).bg(Color::DarkGray),
         )
@@ -873,11 +876,17 @@ fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let par2_title = if par2_active {
+        format!(" PAR2 {} ", spin)
+    } else {
+        " PAR2 ".to_string()
+    };
+
     let gauge = Gauge::default()
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" PAR2 ")
+                .title(par2_title)
                 .border_style(border_style),
         )
         .gauge_style(style)
