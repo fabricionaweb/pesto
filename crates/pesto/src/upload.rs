@@ -318,8 +318,40 @@ pub async fn run_upload(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // ── Post-upload hooks ────────────────────────────────────────────────────
+    // ── NFO + post-upload hooks ──────────────────────────────────────────────
     if !outcome.cancelled && !had_failures && !config.par2_only && !config.dry_run {
+        // Generate .nfo next to the .nzb (or next to the source files).
+        let nfo_path: Option<PathBuf> = if config.nfo {
+            let base = nzb_path
+                .as_ref()
+                .map(|p| p.with_extension("nfo"))
+                .or_else(|| {
+                    entry_paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .map(|d| d.join(format!("{entry_label}.nfo")))
+                });
+            if let Some(ref nfo_out) = base {
+                match crate::nfo::generate(entry_paths) {
+                    Some(content) => match crate::nfo::write(nfo_out, &content) {
+                        Ok(()) => {
+                            emit_status(&progress_tx, format!("wrote nfo:  {}", nfo_out.display()));
+                            Some(nfo_out.clone())
+                        }
+                        Err(e) => {
+                            emit_status(&progress_tx, format!("nfo write failed: {e}"));
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let hook_ctx = crate::hooks::HookContext {
             name: entry_label.to_string(),
             total_bytes,
@@ -335,7 +367,10 @@ pub async fn run_upload(
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            nfo_path: String::new(),
+            nfo_path: nfo_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         };
         let hook_cfg = config.clone();
         let log_lines =
