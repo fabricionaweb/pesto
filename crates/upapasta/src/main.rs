@@ -733,8 +733,19 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
 
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
 
+    // Direct uploads into nzb_dir/uploaded/ so the vault can distinguish them
+    // from downloaded and manually-placed NZBs.
+    let nzb_out_dir: Option<PathBuf> = app
+        .pesto_config
+        .as_ref()
+        .and_then(|c| c.nzb_dir.as_deref())
+        .map(|d| app::expand_tilde(d).join("uploaded"));
+    if let Some(ref d) = nzb_out_dir {
+        let _ = std::fs::create_dir_all(d);
+    }
+
     tokio::spawn(async move {
-        let result = run_real_upload(config, entry_paths, label, tx.clone(), cancel_token).await;
+        let result = run_real_upload(config, entry_paths, label, nzb_out_dir, tx.clone(), cancel_token).await;
         let success = result.is_ok();
         let cancelled = result.as_ref().map(|o| o.cancelled).unwrap_or(false);
         if let Err(ref e) = result {
@@ -816,6 +827,7 @@ async fn run_real_upload(
     config: Config,
     entry_paths: Vec<PathBuf>,
     label: String,
+    nzb_out_dir: Option<PathBuf>,
     tx: mpsc::UnboundedSender<AppEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<pesto::upload::UploadOutcome> {
@@ -836,6 +848,18 @@ async fn run_real_upload(
     let cfg = config.clone();
     let paths = entry_paths.clone();
     let lbl = label.clone();
+    // Resolve the full NZB output path (dir + stem.nzb) when a subdir is given.
+    let nzb_override = nzb_out_dir.map(|dir| {
+        let stem = entry_paths
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|n| {
+                let s = std::path::Path::new(n);
+                s.file_stem().unwrap_or(n).to_string_lossy().into_owned()
+            })
+            .unwrap_or_else(|| label.clone());
+        dir.join(format!("{stem}.nzb"))
+    });
     let upload_handle = tokio::spawn(async move {
         pesto::upload::run_upload(
             &cfg,
@@ -843,7 +867,7 @@ async fn run_real_upload(
             &lbl,
             Some(prog_tx),
             Some(cancel_flag),
-            None,
+            nzb_override,
             true,
         )
         .await

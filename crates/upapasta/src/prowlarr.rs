@@ -268,7 +268,13 @@ pub fn release_name_from_filename(filename: &str) -> &str {
     stem
 }
 
-/// Build the destination path for a downloaded NZB, placing it in `nzb_dir`.
+/// Build the destination path for a downloaded NZB.
+///
+/// Places the file in `nzb_dir/downloaded/` so the vault can distinguish
+/// Prowlarr downloads from uploads and manually-placed NZBs. Creates the
+/// subdirectory if it does not exist yet.
 pub fn dest_path_in(nzb_dir: &Path, result: &SearchResult) -> PathBuf {
-    nzb_dir.join(nzb_filename_for(result))
+    let sub = nzb_dir.join("downloaded");
+    let _ = std::fs::create_dir_all(&sub);
+    sub.join(nzb_filename_for(result))
 }
