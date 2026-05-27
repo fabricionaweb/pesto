@@ -122,14 +122,22 @@ groups = ["alt.binaries.test"]
 # format = "7z"
 
 [output]
-# nzb_dir — directory where .nzb files are saved by default.
-# The filename is derived from the upload name (<stem>.nzb).
-# Overridden by --out or output.nzb.
+# nzb_dir — directory where .nzb hardlinks/copies are placed after each upload.
+# Every upload is also archived to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb so
+# the canonical copy is never lost. Overridden by --out or output.nzb.
 # nzb_dir = "/home/user/nzbs"
 
-# nzb — fixed path for the generated .nzb file. Overrides nzb_dir.
+# nzb — fixed path for the generated .nzb hardlink/copy. Overrides nzb_dir.
 # Overridden by --out.
 # nzb = "upload.nzb"
+
+# nzb_conflict — what to do when the user-destination .nzb already exists.
+#   overwrite  (default) — replace the existing file silently.
+#   rename               — keep the old file; append -1, -2, … to the new name.
+#   fail                 — abort the NZB write and exit with an error.
+# The archive copy in ~/.config/pesto/nzb/ is always kept regardless of this setting.
+# Can also be overridden per-run with --nzb-conflict=<mode> or --no-overwrite (=rename).
+# nzb_conflict = "overwrite"
 
 # nzb_name — value for the <meta type="name"> element in the .nzb.
 # Shown as the release title in NZBGet and SABnzbd. Defaults to the upload name.

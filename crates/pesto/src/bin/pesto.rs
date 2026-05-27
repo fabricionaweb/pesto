@@ -267,6 +267,18 @@ struct Cli {
     #[arg(long)]
     nfo: bool,
 
+    /// When the user-destination `.nzb` already exists, rename it instead of
+    /// overwriting (`--no-overwrite` is short for `--nzb-conflict=rename`)
+    /// [config: output.nzb_conflict].
+    #[arg(long)]
+    no_overwrite: bool,
+
+    /// How to handle a conflict when the user-destination `.nzb` already exists:
+    /// `overwrite` (default), `rename` (append `-1`, `-2`, …), `fail`
+    /// [config: output.nzb_conflict].
+    #[arg(long, value_name = "MODE")]
+    nzb_conflict: Option<pesto::config::NzbConflict>,
+
     /// Shell command to execute after each successful upload. The command
     /// receives upload details via environment variables:
     /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
@@ -457,6 +469,11 @@ impl Cli {
             post_hook: self.post_hook.clone(),
             no_hooks: self.no_hooks,
             nfo: if self.nfo { Some(true) } else { None },
+            nzb_conflict: if self.no_overwrite {
+                Some(pesto::config::NzbConflict::Rename)
+            } else {
+                self.nzb_conflict
+            },
             check: if self.check { Some(true) } else { None },
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
@@ -632,18 +649,34 @@ async fn run_single_upload(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Derive NZB path: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
+    // Derive NZB stem from: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
     // Always use the original entry_paths for the stem so obfuscation/compression
     // does not leak the randomised archive name into the output filenames.
     //
-    // The resume state file is keyed to the BASE stem (no version suffix) so
-    // that a re-post always finds the previous state regardless of versioning.
-    let nzb_base_path: Option<PathBuf> = params
+    // nzb_stem: bare filename without extension, used to name the NZB.
+    // nzb_user_dest: optional user-requested destination (--out or nzb_dir).
+    //   The canonical copy always goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb;
+    //   a hardlink (or copy) is placed at nzb_user_dest when set.
+    let nzb_stem: Option<String> = params
         .out
-        .clone()
-        .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
+        .as_ref()
+        .map(|p| {
+            p.with_extension("")
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
         .or_else(|| {
-            let stem = entry_paths
+            params.nzb_default.as_deref().map(|s| {
+                PathBuf::from(s)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .or_else(|| {
+            entry_paths
                 .first()
                 .and_then(|p| p.file_name())
                 .map(|s| {
@@ -659,25 +692,32 @@ async fn run_single_upload(
                             .to_string_lossy()
                             .into_owned()
                     })
-                })?;
-            let base = if let Some(dir) = &config.nzb_dir {
-                expand_tilde(dir).join(&stem)
-            } else {
-                PathBuf::from(&stem)
-            };
-            Some({
-                let mut s = base.into_os_string();
-                s.push(".nzb");
-                PathBuf::from(s)
-            })
+                })
         });
-    // Resume state uses the base path so it is stable across re-posts.
-    let resume_path: Option<PathBuf> = nzb_base_path
+
+    // User-specified destination directory/path for the NZB hardlink.
+    let nzb_user_dest: Option<PathBuf> = params.out.clone().or_else(|| {
+        nzb_stem.as_deref().and_then(|stem| {
+            config
+                .nzb_dir
+                .as_deref()
+                .map(|dir| expand_tilde(dir).join(format!("{stem}.nzb")))
+        })
+    });
+
+    // Resume state is keyed to the user-visible stem so it is stable across re-posts.
+    let resume_path: Option<PathBuf> = nzb_user_dest
         .as_ref()
-        .map(|p| p.with_extension("pesto-state"));
-    // nzb_out_path starts as the base path; it is versioned (v2, v3, …) lazily
-    // at write time so no filesystem access is needed before posting starts.
-    let nzb_out_path: Option<PathBuf> = nzb_base_path.clone();
+        .map(|p| p.with_extension("pesto-state"))
+        .or_else(|| {
+            nzb_stem
+                .as_deref()
+                .map(|s| PathBuf::from(s).with_extension("pesto-state"))
+        });
+
+    // nzb_out_path is resolved at write time (after post) — placeholder kept for
+    // symmetry with the rest of the function.
+    let nzb_out_path: Option<String> = nzb_stem.clone();
 
     let t_post = std::time::Instant::now();
     let outcome = pesto::poster::post_files_with_progress(
@@ -753,19 +793,24 @@ async fn run_single_upload(
     }
 
     // Write NZB.
-    // Version the output path using rename-based atomic swap: write to a temp
-    // file first, then pick the final versioned name by trying to hard-link it.
-    // This avoids any stat/exists call on the output directory entirely.
-    let out: Option<PathBuf> = if let Some(base) = nzb_out_path {
-        Some(versioned_nzb_path(&base).await)
+    // The canonical copy goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb.
+    // If the user specified a destination (--out or nzb_dir), a hardlink (or
+    // copy when cross-device) is placed there so re-uploads never collide.
+    let out: Option<PathBuf> = if let Some(stem) = nzb_out_path {
+        Some(nzb_archive_path(&stem).await)
     } else {
         None
     };
+
+    // nzb_reported_path: the path shown to the user and passed to hooks/history.
+    // It is the user-dest (hardlink) when set, otherwise the archive copy.
+    let mut nzb_reported_path: Option<PathBuf> = nzb_user_dest.clone().or_else(|| out.clone());
 
     let nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
             if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
+                nzb_reported_path = None;
                 None
             } else {
                 let nzb_meta = NzbMeta {
@@ -786,15 +831,32 @@ async fn run_single_upload(
                 tokio::fs::write(out, &xml)
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
+
+                // Place a hardlink (or copy) at the user-requested destination,
+                // respecting the nzb_conflict policy.
+                if let Some(dest) = &nzb_user_dest {
+                    if let Some(parent) = dest.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    let effective_dest = resolve_nzb_dest(dest, config.nzb_conflict).await?;
+                    if std::fs::hard_link(out, &effective_dest).is_err() {
+                        std::fs::copy(out, &effective_dest).with_context(|| {
+                            format!("copying nzb to `{}`", effective_dest.display())
+                        })?;
+                    }
+                    nzb_reported_path = Some(effective_dest);
+                }
+
+                let reported = nzb_reported_path.as_deref().unwrap_or(out);
                 if params.json_mode {
-                    let path_esc = out
+                    let path_esc = reported
                         .display()
                         .to_string()
                         .replace('\\', "\\\\")
                         .replace('"', "\\\"");
                     println!(r#"{{"type":"nzb_written","path":"{path_esc}"}}"#);
                 } else {
-                    println!("wrote nzb: {}", out.display());
+                    println!("wrote nzb: {}", reported.display());
                 }
 
                 // Append to shared history catalog.
@@ -821,7 +883,7 @@ async fn run_single_upload(
                             server: Some(config.host.as_str()),
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
-                            nzb_path: Some(&out.display().to_string()),
+                            nzb_path: Some(&reported.display().to_string()),
                             subject: config.nzb_name.as_deref().or(Some(entry_label)),
                         },
                         config.history_dir.as_deref(),
@@ -842,7 +904,7 @@ async fn run_single_upload(
         if !config.no_upload {
             if let Some(url) = &config.indexer_url {
                 if let Some(api_key) = &config.indexer_api_key {
-                    let nzb_name = out
+                    let nzb_name = nzb_reported_path
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map(|n| n.to_string_lossy().into_owned())
@@ -880,12 +942,15 @@ async fn run_single_upload(
     // Generate .nfo unconditionally — it is a local artifact and does not
     // depend on a live NNTP connection, --dry-run, or --no-upload.
     let nfo_path: Option<PathBuf> = if config.nfo && !config.par2_only {
-        let base = out.as_ref().map(|p| p.with_extension("nfo")).or_else(|| {
-            entry_paths
-                .first()
-                .and_then(|p| p.parent())
-                .map(|d| d.join(format!("{entry_label}.nfo")))
-        });
+        let base = nzb_reported_path
+            .as_ref()
+            .map(|p| p.with_extension("nfo"))
+            .or_else(|| {
+                entry_paths
+                    .first()
+                    .and_then(|p| p.parent())
+                    .map(|d| d.join(format!("{entry_label}.nfo")))
+            });
         if let Some(ref nfo_out) = base {
             match pesto::nfo::generate(entry_paths) {
                 Some(content) => match pesto::nfo::write(nfo_out, &content) {
@@ -914,7 +979,7 @@ async fn run_single_upload(
     let upload_ok = !outcome.cancelled && outcome.failures.is_empty();
     if upload_ok && !config.par2_only && !config.dry_run {
         let hook_env = HookEnv {
-            nzb_path: out.as_deref(),
+            nzb_path: nzb_reported_path.as_deref(),
             nfo_path: nfo_path.as_deref(),
             name: entry_label,
             total_bytes,
@@ -1721,36 +1786,52 @@ fn is_executable(path: &std::path::Path) -> bool {
 /// Return a unique path for the NZB using `O_CREAT|O_EXCL` (atomic create).
 ///
 /// Tries `base.nzb`, then `base.v2.nzb`, `base.v3.nzb`, … until it can
-/// exclusively create the file. No `stat`/`exists` calls — avoids hanging on
-/// filesystems that block metadata reads for certain paths.
-///
-/// The 0-byte placeholder is left for `tokio::fs::write` to overwrite.
-async fn versioned_nzb_path(base: &Path) -> PathBuf {
-    // Always work from the bare stem (no extension) to avoid double extensions.
-    let bare = base.with_extension("");
-    let dir = bare.parent().unwrap_or(Path::new("."));
-    let stem = bare.file_name().unwrap_or_default().to_string_lossy();
-
-    let try_create = |path: PathBuf| async move {
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await
-            .map(|_| path)
-    };
-
-    if let Ok(p) = try_create(dir.join(format!("{stem}.nzb"))).await {
-        return p;
+/// Resolve the final user-destination path for the NZB according to the
+/// conflict policy. Returns an error when the policy is `Fail` and the file
+/// already exists.
+async fn resolve_nzb_dest(
+    dest: &Path,
+    conflict: pesto::config::NzbConflict,
+) -> anyhow::Result<PathBuf> {
+    use pesto::config::NzbConflict;
+    if !dest.exists() {
+        return Ok(dest.to_path_buf());
     }
-    let mut v = 2u32;
-    loop {
-        let candidate = dir.join(format!("{stem}.v{v}.nzb"));
-        match try_create(candidate.clone()).await {
-            Ok(p) => return p,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => v += 1,
-            Err(_) => return candidate,
+    match conflict {
+        NzbConflict::Overwrite => Ok(dest.to_path_buf()),
+        NzbConflict::Rename => {
+            let base = dest.with_extension("");
+            let stem = base.to_string_lossy();
+            let mut n = 1u32;
+            loop {
+                let candidate = PathBuf::from(format!("{stem}-{n}.nzb"));
+                if !candidate.exists() {
+                    return Ok(candidate);
+                }
+                n += 1;
+            }
         }
+        NzbConflict::Fail => {
+            anyhow::bail!(
+                "nzb file already exists: {} (set nzb_conflict = \"overwrite\" or \"rename\" to allow)",
+                dest.display()
+            )
+        }
+    }
+}
+
+/// Return the canonical NZB archive path: `~/.config/pesto/nzb/TIMESTAMP_stem.nzb`.
+/// Creates the directory if needed. The timestamp prefix makes every upload
+/// unique so overwrites are never an issue.
+async fn nzb_archive_path(stem: &str) -> PathBuf {
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let filename = format!("{timestamp}_{stem}.nzb");
+
+    if let Some(dir) = pesto::config::config_dir().map(|d| d.join("nzb")) {
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        dir.join(filename)
+    } else {
+        PathBuf::from(filename)
     }
 }
 
