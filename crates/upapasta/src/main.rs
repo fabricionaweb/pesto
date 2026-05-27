@@ -837,6 +837,7 @@ fn build_dry_run_config() -> Config {
         post_hook: None,
         no_hooks: true,
         nfo: false,
+        nzb_conflict: pesto::config::NzbConflict::Overwrite,
         quiet: false,
         bell: false,
         check: false,
