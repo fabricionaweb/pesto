@@ -35,6 +35,19 @@ pub struct ServerEntry {
     pub retry_delay: u64,
 }
 
+/// What to do when the NZB user-destination already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum NzbConflict {
+    /// Overwrite (hardlink/copy) the existing file silently. Default.
+    #[default]
+    Overwrite,
+    /// Rename the destination by appending `-1`, `-2`, … until the name is free.
+    Rename,
+    /// Abort the NZB write and print an error. The archive copy is still kept.
+    Fail,
+}
+
 /// How much of a post to obfuscate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -146,6 +159,9 @@ pub struct OutputSection {
     pub post_hook: Option<String>,
     /// Generate a `.nfo` file alongside the `.nzb` after posting.
     pub nfo: Option<bool>,
+    /// How to handle a conflict when the user-destination `.nzb` already exists.
+    /// `"overwrite"` (default), `"rename"` (append `-1`, `-2`, …), `"fail"`.
+    pub nzb_conflict: Option<NzbConflict>,
     /// Resume interrupted uploads from a saved state file. Default: false.
     pub resume: Option<bool>,
     /// Show only a single spinner line instead of the full panel. Default: false.
@@ -238,6 +254,7 @@ pub struct Overrides {
     pub post_hook: Option<String>,
     pub no_hooks: bool,
     pub nfo: Option<bool>,
+    pub nzb_conflict: Option<NzbConflict>,
     pub check: Option<bool>,
     pub check_delay_secs: Option<u64>,
     pub check_retries: Option<u32>,
@@ -294,6 +311,7 @@ pub struct Config {
     pub post_hook: Option<String>,
     pub no_hooks: bool,
     pub nfo: bool,
+    pub nzb_conflict: NzbConflict,
     pub quiet: bool,
     pub bell: bool,
     pub check: bool,

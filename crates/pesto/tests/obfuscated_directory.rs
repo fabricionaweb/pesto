@@ -57,6 +57,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         post_hook: None,
         no_hooks: false,
         nfo: false,
+        nzb_conflict: pesto::config::NzbConflict::Overwrite,
         quiet: false,
         bell: false,
         check: false,

@@ -89,6 +89,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         post_hook: None,
         no_hooks: false,
         nfo: false,
+        nzb_conflict: pesto::config::NzbConflict::Overwrite,
         quiet: false,
         bell: false,
         check: false,

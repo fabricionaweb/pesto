@@ -216,6 +216,10 @@ impl Config {
             post_hook: cli.post_hook.or(file.output.post_hook),
             no_hooks: cli.no_hooks,
             nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
+            nzb_conflict: cli
+                .nzb_conflict
+                .or(file.output.nzb_conflict)
+                .unwrap_or_default(),
             quiet: file.output.quiet.unwrap_or(false),
             bell: file.output.bell.unwrap_or(false),
             check: cli
