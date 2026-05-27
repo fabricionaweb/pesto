@@ -679,19 +679,37 @@ async fn run_single_upload(
         .or_else(|| {
             entry_paths
                 .first()
-                .and_then(|p| p.file_name())
-                .map(|s| {
-                    let p = std::path::Path::new(s);
-                    p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+                .and_then(|p| {
+                    p.file_name().map(|s| {
+                        // Release directories use the full folder name as the NZB
+                        // stem — calling file_stem() would strip codec tags like
+                        // "264" from "H.264" or "0" from "AAC2.0".
+                        if p.is_dir() {
+                            s.to_string_lossy().into_owned()
+                        } else {
+                            std::path::Path::new(s)
+                                .file_stem()
+                                .unwrap_or(s)
+                                .to_string_lossy()
+                                .into_owned()
+                        }
+                    })
                 })
                 .or_else(|| upload_root(&inputs))
                 .or_else(|| {
                     inputs.first().map(|f| {
-                        PathBuf::from(f.name.split('/').next().unwrap_or(&f.name))
-                            .file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned()
+                        let top = f.name.split('/').next().unwrap_or(&f.name);
+                        // When the name has a slash, top is a directory component —
+                        // use it as-is to avoid stripping codec tags.
+                        if f.name.contains('/') {
+                            top.to_owned()
+                        } else {
+                            PathBuf::from(top)
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        }
                     })
                 })
         });
