@@ -7,6 +7,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.9] — 2026-05-27
+
+### Changed
+- NZB files are now placed **next to the uploaded file** by default when
+  `nzb_dir` is not configured and `--out` is not passed. Previously they were
+  only written to the internal archive (`~/.config/pesto/nzb/`), which left
+  no user-visible copy without explicit configuration. This makes `.nzb` and
+  `.nfo` behaviour consistent — both now land beside the source files.
+- `pesto --config` wizard now includes an **Output** section with two new
+  questions: the NZB output directory (blank = next to uploaded file) and
+  whether to generate `.nfo` files. The generated TOML always contains an
+  `[output]` block with comments explaining the defaults.
+
+## [0.3.8] — 2026-05-27
+
+### Fixed
+- NZB stem no longer truncates release names that contain dots (e.g.
+  `Show.S01E01.1080p` was previously shortened to `Show`). The stem is now
+  derived from `file_name()` for directories and files with multiple dots,
+  matching the behaviour described in the inline comments.
+
+## [0.3.7] — 2026-05-27
+
+### Changed
+- `--watch` leaves processed entries in place by default. Files are no longer
+  moved or deleted after a successful upload unless explicitly configured.
+
+## [0.3.6] — 2026-05-27
+
+### Added
+- NZB archive: every upload now writes a canonical copy to
+  `~/.config/pesto/nzb/TIMESTAMP_stem.nzb`, ensuring the NZB is never lost
+  regardless of `--out` or `nzb_dir` settings.
+- `pesto-poster` crate alias and `README.md` symlink for crates.io publish.
+
+### Fixed
+- `--watch` settle check prevents uploads from starting before a file has
+  finished being written; failed uploads are retried automatically.
+
+### Changed
+- `upapasta`: `nzb_conflict` field added to `Config` initializer.
+
+## [0.3.5] — 2026-05-26
+
+### Fixed
+- Strip Windows `\\?\` prefix from `mediainfo` **Complete name** field in NFO
+  output, which appeared when `canonicalize()` returned an extended-length path
+  on Windows.
+
 ## [0.3.3] — 2026-05-26
 
 ### Fixed
