@@ -715,12 +715,24 @@ async fn run_single_upload(
         });
 
     // User-specified destination directory/path for the NZB hardlink.
+    // Priority: --out > nzb_dir > directory next to the uploaded file(s).
     let nzb_user_dest: Option<PathBuf> = params.out.clone().or_else(|| {
         nzb_stem.as_deref().and_then(|stem| {
-            config
-                .nzb_dir
-                .as_deref()
-                .map(|dir| expand_tilde(dir).join(format!("{stem}.nzb")))
+            if let Some(dir) = config.nzb_dir.as_deref() {
+                Some(expand_tilde(dir).join(format!("{stem}.nzb")))
+            } else {
+                // Default: place the NZB next to the uploaded file/directory.
+                entry_paths
+                    .first()
+                    .and_then(|p| {
+                        if p.is_dir() {
+                            Some(p.as_path())
+                        } else {
+                            p.parent()
+                        }
+                    })
+                    .map(|d| d.join(format!("{stem}.nzb")))
+            }
         })
     });
 
