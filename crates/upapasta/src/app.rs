@@ -141,6 +141,30 @@ impl UploadProgress {
             self.speed_history.remove(0);
         }
     }
+
+    /// Reset the aggregate gauges for a new queue item. Uploads run one NZB at a
+    /// time and each item's progress events restart from zero, while `apply`
+    /// only ever grows `done_segments`/`done_bytes` (so a single item's bar
+    /// never jumps backwards). Without this reset the previous item's 100% state
+    /// swallows the next item's smaller counts and the bar looks frozen. The
+    /// per-file rows and the speed-history sparkline are kept; the clock is
+    /// restarted so speed/ETA track the current item.
+    pub fn reset_for_item(&mut self) {
+        self.total_segments = 0;
+        self.done_segments = 0;
+        self.total_bytes = 0;
+        self.done_bytes = 0;
+        self.last_speed = 0.0;
+        self.start_time = Some(Instant::now());
+        self.phase = UploadPhase::default();
+        self.par2_done_slices = 0;
+        self.par2_total_slices = 0;
+        self.par2_finished = false;
+        self.par2_hint_remaining = 0;
+        self.compress_total_bytes = 0;
+        self.compress_done_bytes = 0;
+        self.compress_finished = false;
+    }
 }
 
 impl UploadProgress {
@@ -1086,6 +1110,10 @@ impl App {
     /// live [▶] badge in the Browser (only this item, since uploads are
     /// sequential).
     pub fn item_upload_started(&mut self, path: &str) {
+        // Each item posts its own NZB and restarts its progress from zero, so
+        // clear the previous item's gauges; otherwise the bar stays pinned at
+        // the last item's 100% (apply() only grows the counters).
+        self.progress.reset_for_item();
         self.queue_status
             .insert(path.to_string(), FileStatus::Active);
         if let Some(fp) = self.progress.files.iter_mut().find(|f| f.name == path) {
@@ -2349,6 +2377,49 @@ mod tests {
         assert_eq!(full.file_count, 2);
         assert_eq!(full.size_bytes, 300);
         assert_eq!(full.files_label(), "2");
+    }
+
+    /// The aggregate bar must track each queue item, not stay pinned at the
+    /// previous item's 100%. `apply` only grows the counters within one item, so
+    /// `reset_for_item` is what lets the next item's smaller counts show.
+    #[test]
+    fn progress_bar_tracks_each_queue_item() {
+        use super::UploadProgress;
+        use crate::events::ProgressUpdate;
+
+        fn upd(done_segments: u64, total_segments: u64) -> ProgressUpdate {
+            ProgressUpdate {
+                done_segments,
+                total_segments,
+                done_bytes: done_segments * 1000,
+                total_bytes: total_segments * 1000,
+                current_speed_mbps: 0.0,
+                message: None,
+                file_update: None,
+                phase: None,
+                par2_slices: None,
+                queue_extended: None,
+                par2_hint_bytes: 0,
+                par2_complete: false,
+            }
+        }
+
+        let mut p = UploadProgress::default();
+        // Item 1 runs to completion.
+        p.apply(&upd(100, 100));
+        assert_eq!(p.done_segments, 100);
+        assert_eq!(p.total_segments, 100);
+
+        // Without the reset, item 2's smaller counts (5 < 100) would be ignored
+        // by the monotonic apply and the bar would stay at 100%.
+        p.reset_for_item();
+        assert_eq!(p.done_segments, 0);
+        assert_eq!(p.total_segments, 0);
+
+        p.apply(&upd(5, 50));
+        assert_eq!(p.done_segments, 5);
+        assert_eq!(p.total_segments, 50);
+        assert!((p.progress_pct() - 10.0).abs() < 1e-9);
     }
 
     /// A plain file is fully resolved by the quick form (a single `stat`), so it
