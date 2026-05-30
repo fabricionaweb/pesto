@@ -88,11 +88,26 @@ pub enum AppEvent {
     UploadError(String),
     // Periodic UI tick
     Tick,
+    // A single queue item started uploading (sequential, one NZB at a time).
+    ItemUploadStarted {
+        path: String,
+    },
+    // A single queue item finished, carrying the real data pesto produced so
+    // the catalog can be written per-item (real size, real NZB path) instead of
+    // a fabricated average at the end of the batch.
+    ItemUploadDone {
+        path: String,
+        success: bool,
+        size_bytes: u64,
+        nzb_path: Option<std::path::PathBuf>,
+        duration_s: f64,
+    },
     // Internal: upload task finished
-    UploadFinished { success: bool, cancelled: bool },
+    UploadFinished {
+        success: bool,
+        cancelled: bool,
+    },
     // Upload control
-    PauseUpload,
-    ResumeUpload,
     Quit,
     // Prowlarr connection check result
     ProwlarrStatus(crate::prowlarr::ConnectionStatus),

@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 pub enum AppState {
     #[default]
     Dashboard,
+    /// Dedicated upload-queue screen: review, reorder, remove and launch the
+    /// queue built in the Browser. The single home for queue management.
+    Queue,
     Browser,
     History,
     NzbVault,
@@ -187,16 +190,110 @@ impl UploadProgress {
     }
 }
 
+/// Describes how a queued path will become an NZB. A directory bundles every
+/// file under it into a single NZB named after the folder (the standard Usenet
+/// "release" unit); a plain file becomes one NZB named after the file. This is
+/// what makes the queue predictable: one entry → one NZB, never one-per-inner
+/// file and never several entries merged together.
+#[derive(Debug, Clone)]
+pub struct QueueEntryInfo {
+    /// Display name of the resulting NZB (without the `.nzb` suffix).
+    pub nzb_name: String,
+    /// Whether the queued path is a directory (a release bundle).
+    pub is_dir: bool,
+    /// Number of files the NZB will contain (1 for a plain file).
+    pub file_count: usize,
+    /// Total bytes the entry will upload (file length, or the sum under a dir).
+    pub size_bytes: u64,
+}
+
+/// Compute the NZB grouping info for a queued path. For a directory this walks
+/// the tree once to count files and sum their sizes so the user can see, before
+/// confirming, that a folder becomes a single NZB.
+pub fn queue_entry_info(path: &str) -> QueueEntryInfo {
+    let p = std::path::Path::new(path);
+    let base = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_string();
+    if p.is_dir() {
+        let (file_count, size_bytes) = dir_stats(p);
+        QueueEntryInfo {
+            // A folder name is kept verbatim: dots in a release name are not a
+            // file extension and must not be stripped.
+            nzb_name: base,
+            is_dir: true,
+            file_count,
+            size_bytes,
+        }
+    } else {
+        // Strip a single extension for a plain file's NZB stem (movie.mkv → movie).
+        let stem = p
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| base.clone());
+        QueueEntryInfo {
+            nzb_name: stem,
+            is_dir: false,
+            file_count: 1,
+            size_bytes: std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+        }
+    }
+}
+
+/// Recursively count regular files under `dir` and sum their sizes, stopping at
+/// a sane cap so a pathological tree cannot stall the UI. Symlinks are skipped
+/// to match `pesto::walk` (which does the same during the real upload).
+fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
+    const CAP: usize = 100_000;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in rd.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                count += 1;
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if count >= CAP {
+                    return (count, bytes);
+                }
+            }
+        }
+    }
+    (count, bytes)
+}
+
 pub struct App {
     pub state: AppState,
     pub file_tree: FileTree,
     pub upload_queue: UploadQueue,
+    /// Cached NZB grouping info per queued path, keyed by the absolute path
+    /// string stored in `upload_queue.items`. Kept in sync on every queue
+    /// mutation so the UI never re-walks directories on the render hot path.
+    pub queue_meta: std::collections::HashMap<String, QueueEntryInfo>,
+    /// Live per-item upload state, keyed by the queue path. Drives the ✓/✗/▶
+    /// icons in the queue view and survives a partial batch so a failed item
+    /// can be retried without losing the record of the ones that succeeded.
+    pub queue_status: std::collections::HashMap<String, FileStatus>,
     /// Incremented on every Tick event — drives spinner animations in the UI.
     pub tick_count: u64,
     pub log_panel: LogPanel,
     pub status_bar: StatusBar,
     pub upload_in_progress: bool,
-    pub upload_paused: bool,
     pub progress: UploadProgress,
     pub current_cancel_token: Option<CancellationToken>,
 
@@ -486,11 +583,12 @@ impl App {
             state: AppState::Browser,
             file_tree: FileTree::new(),
             upload_queue: UploadQueue::new(),
+            queue_meta: std::collections::HashMap::new(),
+            queue_status: std::collections::HashMap::new(),
             tick_count: 0,
             log_panel: LogPanel::new(80),
             status_bar: StatusBar::new(status_msg),
             upload_in_progress: false,
-            upload_paused: false,
             progress: UploadProgress::default(),
             current_cancel_token: None,
             pesto_config,
@@ -543,15 +641,88 @@ impl App {
         app
     }
 
-    pub fn add_to_queue(&mut self, path: String) {
-        self.upload_queue.add(path.clone());
-        self.status_bar.set("Added to upload queue");
-        self.log_panel.push(format!("Queued: {}", path));
+    /// Toggle the item under the Browser cursor in the upload queue, then
+    /// advance the cursor. This is the single selection action (`Space`): the
+    /// queue is the one source of truth, so the Browser `[x]` badge and the
+    /// queue panel always agree. Files and directories are both allowed; a
+    /// directory is queued as one release → one NZB.
+    pub fn toggle_queue_at_cursor(&mut self) {
+        let path = match self.file_tree.get_selected().cloned() {
+            Some(p) => p,
+            None => return,
+        };
+        let key = path.to_string_lossy().to_string();
+        let now_queued = self.upload_queue.toggle(key.clone());
+        if now_queued {
+            let info = queue_entry_info(&key);
+            if info.is_dir {
+                self.status_bar.set(format!(
+                    "Queued folder “{}” → 1 NZB ({} files) — {} in queue",
+                    info.nzb_name,
+                    info.file_count,
+                    self.upload_queue.items.len()
+                ));
+            } else {
+                self.status_bar.set(format!(
+                    "Queued “{}” — {} in queue",
+                    info.nzb_name,
+                    self.upload_queue.items.len()
+                ));
+            }
+            self.queue_meta.insert(key, info);
+        } else {
+            self.queue_meta.remove(&key);
+            self.status_bar.set(format!(
+                "Unqueued — {} item(s) in queue",
+                self.upload_queue.items.len()
+            ));
+        }
+        self.sync_queue_badges();
+        self.save_queue();
+        self.file_tree.select_next();
+    }
+
+    /// Rebuild the Browser badge mirror from the queue. Must be called after any
+    /// mutation of `upload_queue.items`.
+    pub fn sync_queue_badges(&mut self) {
+        let set: std::collections::HashSet<PathBuf> =
+            self.upload_queue.items.iter().map(PathBuf::from).collect();
+        self.file_tree.set_queued(set);
+    }
+
+    /// Grouping info for a queued path, from the cache when available.
+    pub fn queue_info(&self, path: &str) -> QueueEntryInfo {
+        self.queue_meta
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| queue_entry_info(path))
+    }
+
+    /// Remove the selected queue item, keeping caches and badges in sync.
+    pub fn remove_queue_selected(&mut self) -> Option<String> {
+        let removed = self.upload_queue.remove_selected();
+        if let Some(ref p) = removed {
+            self.queue_meta.remove(p);
+            self.sync_queue_badges();
+            self.save_queue();
+        }
+        removed
+    }
+
+    /// Clear the whole queue, returning how many items were removed.
+    pub fn clear_queue(&mut self) -> usize {
+        let count = self.upload_queue.items.len();
+        self.upload_queue.clear();
+        self.queue_meta.clear();
+        self.sync_queue_badges();
+        self.save_queue();
+        count
     }
 
     pub fn next_tab(&mut self) {
         self.state = match self.state {
-            AppState::Dashboard => AppState::Browser,
+            AppState::Dashboard => AppState::Queue,
+            AppState::Queue => AppState::Browser,
             AppState::Browser => AppState::History,
             AppState::History => AppState::NzbVault,
             AppState::NzbVault => AppState::Config,
@@ -566,7 +737,8 @@ impl App {
     pub fn prev_tab(&mut self) {
         self.state = match self.state {
             AppState::Dashboard => AppState::Config,
-            AppState::Browser => AppState::Dashboard,
+            AppState::Queue => AppState::Dashboard,
+            AppState::Browser => AppState::Queue,
             AppState::History => AppState::Browser,
             AppState::NzbVault => AppState::History,
             AppState::Config => AppState::NzbVault,
@@ -675,19 +847,17 @@ impl App {
         self.upload_queue.active = self.upload_queue.items.len();
         self.upload_started_at = Some(Instant::now());
 
-        // Mark uploading files in the browser for live [▶] badge
-        let uploading_names: std::collections::HashSet<String> = self
+        // Reset per-item state to Pending. The live [▶] badge and Active state
+        // are then driven one item at a time by ItemUploadStarted, because
+        // uploads run sequentially (one NZB at a time).
+        self.queue_status = self
             .upload_queue
             .items
             .iter()
-            .filter_map(|p| {
-                std::path::Path::new(p)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-            })
+            .map(|p| (p.clone(), FileStatus::Pending))
             .collect();
-        self.file_tree.set_uploading(uploading_names);
+        self.file_tree
+            .set_uploading(std::collections::HashSet::new());
 
         let token = CancellationToken::new();
         self.current_cancel_token = Some(token.clone());
@@ -715,7 +885,7 @@ impl App {
         };
 
         self.status_bar.set(format!(
-            "🚀 Upload started ({} files) — streaming real pesto progress (x to cancel, p to pause)",
+            "🚀 Upload started ({} files) — streaming real pesto progress (x to cancel)",
             self.upload_queue.items.len()
         ));
         let mode = if self.pesto_config.is_some() {
@@ -742,42 +912,142 @@ impl App {
             .push("------------------------------------------".to_string());
     }
 
+    /// Live upload state for a queued path (Pending when unknown).
+    pub fn item_status(&self, path: &str) -> FileStatus {
+        self.queue_status
+            .get(path)
+            .copied()
+            .unwrap_or(FileStatus::Pending)
+    }
+
+    /// A single queue item began uploading. Mark it Active and light up its
+    /// live [▶] badge in the Browser (only this item, since uploads are
+    /// sequential).
+    pub fn item_upload_started(&mut self, path: &str) {
+        self.queue_status
+            .insert(path.to_string(), FileStatus::Active);
+        if let Some(fp) = self.progress.files.iter_mut().find(|f| f.name == path) {
+            fp.status = FileStatus::Active;
+        }
+        let basename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+        let mut set = std::collections::HashSet::new();
+        if let Some(b) = basename {
+            set.insert(b);
+        }
+        self.file_tree.set_uploading(set);
+    }
+
+    /// A single queue item finished. Record it in the catalog immediately with
+    /// the real size and the real NZB path pesto wrote, so a later failure in
+    /// the same batch can never erase this success. Failed items are kept in
+    /// the queue (marked ✗) for retry.
+    pub fn item_upload_done(
+        &mut self,
+        path: &str,
+        success: bool,
+        size_bytes: u64,
+        nzb_path: Option<PathBuf>,
+        duration_s: f64,
+    ) {
+        let status = if success {
+            FileStatus::Done
+        } else {
+            FileStatus::Failed
+        };
+        self.queue_status.insert(path.to_string(), status);
+        if let Some(fp) = self.progress.files.iter_mut().find(|f| f.name == path) {
+            fp.status = status;
+            if success && fp.total_segments == 0 {
+                // No per-file segment stream matched; show a full gauge anyway.
+                fp.total_segments = 1;
+                fp.done_segments = 1;
+            }
+        }
+
+        if !success {
+            return;
+        }
+
+        if let Some(ref cat) = self.catalog {
+            let original_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let group = self
+                .pesto_config
+                .as_ref()
+                .and_then(|c| c.groups.first().cloned());
+            let server = self.pesto_config.as_ref().map(|c| c.host.clone());
+
+            let mut rec = NewUpload::from_name(original_name);
+            rec.size_bytes = (size_bytes > 0).then_some(size_bytes as i64);
+            rec.upload_duration_s = Some(duration_s);
+            rec.usenet_group = group;
+            rec.nntp_server = server;
+            rec.nzb_path = nzb_path.map(|p| p.to_string_lossy().into_owned());
+            if let Err(e) = cat.record(&rec) {
+                self.log_panel.push(format!("catalog record error: {}", e));
+            }
+        }
+        // Reflect the new catalog entry in the Browser's NZB status column.
+        self.refresh_nzb_status();
+    }
+
+    /// Refresh only the per-file NZB status map used by the Browser (cheaper
+    /// than a full history refresh; safe to call after each item).
+    pub fn refresh_nzb_status(&mut self) {
+        if let Some(ref cat) = self.catalog {
+            if let Ok(map) = cat.status_map() {
+                self.file_tree.set_nzb_status(map);
+            }
+        }
+    }
+
     pub fn upload_finished(&mut self, success: bool, cancelled: bool) {
-        let duration_s = self
-            .upload_started_at
-            .take()
-            .map(|t| t.elapsed().as_secs_f64());
+        // Catalog records are written per-item in `item_upload_done`, with the
+        // real size and NZB path; nothing is recorded here. This finalizes the
+        // batch UI and prunes the queue.
+        self.upload_started_at.take();
 
         self.upload_in_progress = false;
-        self.upload_paused = false;
         self.upload_queue.active = 0;
         self.progress.is_cancelled = cancelled;
 
-        // Record each uploaded file in the catalog
-        if success && !cancelled {
-            if let Some(ref cat) = self.catalog {
-                let size_each = if self.upload_queue.items.is_empty() {
-                    None
-                } else {
-                    self.progress
-                        .total_bytes
-                        .checked_div(self.upload_queue.items.len() as u64)
-                        .map(|b| b as i64)
-                };
-                let group = self
-                    .pesto_config
-                    .as_ref()
-                    .and_then(|c| c.groups.first().cloned());
-                let server = self.pesto_config.as_ref().map(|c| c.host.clone());
-                for name in &self.upload_queue.items {
-                    let mut rec = NewUpload::from_name(name.clone());
-                    rec.size_bytes = size_each;
-                    rec.upload_duration_s = duration_s;
-                    rec.usenet_group = group.clone();
-                    rec.nntp_server = server.clone();
-                    let _ = cat.record(&rec);
+        // On a non-cancelled batch, successfully uploaded items leave the queue
+        // (they now live in History with a ✓ badge); failed items stay queued
+        // so the user can fix the problem and press `u` to retry just them.
+        let mut failed = 0usize;
+        if !cancelled {
+            let done: Vec<String> = self
+                .upload_queue
+                .items
+                .iter()
+                .filter(|p| self.item_status(p) == FileStatus::Done)
+                .cloned()
+                .collect();
+            failed = self
+                .upload_queue
+                .items
+                .iter()
+                .filter(|p| self.item_status(p) == FileStatus::Failed)
+                .count();
+            for p in &done {
+                if let Some(pos) = self.upload_queue.items.iter().position(|q| q == p) {
+                    self.upload_queue.items.remove(pos);
                 }
+                self.queue_meta.remove(p);
+                self.queue_status.remove(p);
             }
+            let len = self.upload_queue.items.len();
+            if self.upload_queue.selected >= len {
+                self.upload_queue.selected = len.saturating_sub(1);
+            }
+            self.sync_queue_badges();
+            self.save_queue();
         }
 
         self.progress.files.clear();
@@ -791,13 +1061,12 @@ impl App {
             self.status_bar.set("Upload finished successfully");
             self.log_panel.push("=== Upload finished ===".to_string());
         } else {
-            // Keep the UploadError message in the status bar if it was set;
-            // only fall back to this generic message if nothing else set it.
             self.log_panel
-                .push("=== Upload failed — check logs above ===".to_string());
-            if !self.status_bar.message.contains("error") {
-                self.status_bar.set("Upload failed — see Dashboard logs");
-            }
+                .push("=== Upload finished with failures — check logs above ===".to_string());
+            self.status_bar.set(format!(
+                "{} item(s) failed — still queued, press u to retry",
+                failed
+            ));
         }
 
         // Refresh the history list if it's currently visible
@@ -859,22 +1128,6 @@ impl App {
         self.status_bar.set("Cancelling upload...");
         self.log_panel
             .push("=== Upload cancellation requested ===".to_string());
-    }
-
-    pub fn toggle_pause(&mut self) {
-        if !self.upload_in_progress {
-            return;
-        }
-
-        self.upload_paused = !self.upload_paused;
-
-        if self.upload_paused {
-            self.status_bar.set("Upload paused (p to resume)");
-            self.log_panel.push("=== Upload paused ===".to_string());
-        } else {
-            self.status_bar.set("Upload resumed");
-            self.log_panel.push("=== Upload resumed ===".to_string());
-        }
     }
 
     /// Returns a user-friendly summary of the settings that will be used
@@ -1424,6 +1677,59 @@ impl App {
         }
     }
 
+    /// Persist the current upload queue (the list of paths) so a carefully
+    /// built selection survives navigating away or restarting the app.
+    pub fn save_queue(&self) {
+        if let Some(path) = queue_path() {
+            if let Ok(json) = serde_json::to_string_pretty(&self.upload_queue.items) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    /// Restore a previously saved queue, dropping any path that no longer
+    /// exists on disk, and rebuild the grouping cache and Browser badges.
+    pub fn load_queue(&mut self) {
+        let Some(path) = queue_path() else { return };
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<String>>(&data) else {
+            return;
+        };
+        let mut dropped = 0usize;
+        self.upload_queue.items = items
+            .into_iter()
+            .filter(|p| {
+                let exists = std::path::Path::new(p).exists();
+                if !exists {
+                    dropped += 1;
+                }
+                exists
+            })
+            .collect();
+        self.upload_queue.selected = 0;
+        self.queue_meta = self
+            .upload_queue
+            .items
+            .iter()
+            .map(|p| (p.clone(), queue_entry_info(p)))
+            .collect();
+        self.sync_queue_badges();
+        let n = self.upload_queue.items.len();
+        if n > 0 {
+            let mut msg = format!("Restored {n} queued item(s)");
+            if dropped > 0 {
+                msg.push_str(&format!(" ({dropped} missing path(s) dropped)"));
+            }
+            self.status_bar.set(msg);
+        }
+        // Persist the pruned list so missing paths do not linger.
+        if dropped > 0 {
+            self.save_queue();
+        }
+    }
+
     /// Load previously saved session overrides and merge them into config_state.
     /// Values already set (e.g. from the pesto config) are not overwritten.
     pub fn load_upload_prefs(&mut self) {
@@ -1521,6 +1827,11 @@ fn collect_nzbs_recursive(
 /// Path to the upload preferences file.
 fn upload_prefs_path() -> Option<PathBuf> {
     pesto::config::config_dir().map(|d| d.join("upapasta-prefs.json"))
+}
+
+/// Path to the persisted upload queue.
+fn queue_path() -> Option<PathBuf> {
+    pesto::config::config_dir().map(|d| d.join("upapasta-queue.json"))
 }
 
 /// Expand a leading `~` to the user's home directory.
