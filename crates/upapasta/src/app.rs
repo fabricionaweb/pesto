@@ -92,6 +92,46 @@ pub struct UploadSettingsSummary {
     pub verify: String,
 }
 
+// ── Canonical display vocabulary ──────────────────────────────────────────────
+//
+// One source of truth for how settings are *shown*, so the Dashboard summary,
+// the upload-config panel and the Config overrides all read the same. These map
+// internal values to display labels only — the stored values (enums, bools and
+// the compress-format token used by the cycle handlers) are untouched.
+
+/// Display label for an obfuscation mode: `None` / `Subject` / `Full`.
+pub fn obf_label(mode: ObfuscateMode) -> &'static str {
+    match mode {
+        ObfuscateMode::None => "None",
+        ObfuscateMode::Subject => "Subject",
+        ObfuscateMode::Full => "Full",
+    }
+}
+
+/// Display label for an on/off setting.
+pub fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
+/// Display label for a compression-format token (`none`/`zip`/`7z`/`rar`).
+/// The token stays the logic value used by the cycle handlers; this only
+/// controls how it is rendered (`none` → `Off`).
+pub fn compress_label(token: &str) -> String {
+    match token {
+        "none" | "" => "Off".to_string(),
+        "zip" => "Zip".to_string(),
+        "rar" => "Rar".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The marker shown for an unset / empty value, used everywhere.
+pub const UNSET: &str = "—";
+
 impl UploadProgress {
     const MAX_HISTORY: usize = 60; // ~1 minute at 1 sample/sec
 
@@ -1213,27 +1253,20 @@ impl App {
             None
         };
         if let Some(cfg) = cfg_ref {
-            let obfuscate = match cfg.obfuscate {
-                ObfuscateMode::None => "None (real filenames)",
-                ObfuscateMode::Subject => "Subject only",
-                ObfuscateMode::Full => "Full (subject + yEnc name)",
-            }
-            .to_string();
+            let obfuscate = obf_label(cfg.obfuscate).to_string();
 
-            let compression = if let Some(fmt) = &cfg.compress_format {
-                if cfg.compress_password.is_some() {
-                    format!("{} + password", fmt)
-                } else {
-                    fmt.clone()
+            let compression = match &cfg.compress_format {
+                Some(fmt) if cfg.compress_password.is_some() => {
+                    format!("{} + password", compress_label(fmt))
                 }
-            } else {
-                "Disabled".to_string()
+                Some(fmt) => compress_label(fmt),
+                None => "Off".to_string(),
             };
 
             let par2 = format!("{}%", cfg.par2);
 
             let groups = if cfg.groups.is_empty() {
-                "Not set".to_string()
+                UNSET.to_string()
             } else {
                 cfg.groups.join(", ")
             };
@@ -1246,12 +1279,7 @@ impl App {
 
             let article = format!("{} KB / {} chars", cfg.article_size / 1024, cfg.line_length);
 
-            let verify = if cfg.verify {
-                "Enabled (STAT)"
-            } else {
-                "Disabled"
-            }
-            .to_string();
+            let verify = on_off(cfg.verify).to_string();
 
             UploadSettingsSummary {
                 obfuscate,
@@ -1266,12 +1294,12 @@ impl App {
             // Dry-run defaults (what we currently use in build_dry_run_config)
             UploadSettingsSummary {
                 obfuscate: "None (dry-run)".to_string(),
-                compression: "Disabled (dry-run)".to_string(),
+                compression: "Off (dry-run)".to_string(),
                 par2: "5% (dry-run)".to_string(),
                 groups: "alt.binaries.test (dry-run)".to_string(),
                 from: "upapasta@local (dry-run)".to_string(),
                 article_size: "750 KB / 128 chars (dry-run)".to_string(),
-                verify: "Disabled (dry-run)".to_string(),
+                verify: "Off (dry-run)".to_string(),
             }
         }
     }
@@ -1878,7 +1906,7 @@ impl App {
         let cfg = self.pesto_config.as_ref();
         let mask = |raw: &str| -> String {
             if raw.is_empty() {
-                "—".to_string()
+                UNSET.to_string()
             } else if self.confirm_show_password {
                 raw.to_string()
             } else {
@@ -1891,12 +1919,7 @@ impl App {
                 let (label, value, hint): (&'static str, String, &'static str) = match field {
                     ConfirmField::Obfuscate => (
                         "Obfuscate",
-                        match self.obf_effective() {
-                            ObfuscateMode::None => "none",
-                            ObfuscateMode::Subject => "subject",
-                            ObfuscateMode::Full => "full",
-                        }
-                        .to_string(),
+                        obf_label(self.obf_effective()).to_string(),
                         "←→ cycle",
                     ),
                     ConfirmField::Par2 => (
@@ -1909,7 +1932,11 @@ impl App {
                         self.effective_folder_mode().label().to_string(),
                         "←→ cycle",
                     ),
-                    ConfirmField::Compress => ("Compress", self.compress_effective(), "←→ cycle"),
+                    ConfirmField::Compress => (
+                        "Compress",
+                        compress_label(&self.compress_effective()),
+                        "←→ cycle",
+                    ),
                     ConfirmField::CompressPassword => {
                         let raw = ov
                             .compress_password
@@ -1920,12 +1947,8 @@ impl App {
                     }
                     ConfirmField::Verify => (
                         "Verify",
-                        if ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)) {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                        .to_string(),
+                        on_off(ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)))
+                            .to_string(),
                         "←→ toggle",
                     ),
                     ConfirmField::NzbPassword => {
@@ -1941,7 +1964,7 @@ impl App {
                         ov.groups
                             .clone()
                             .or_else(|| cfg.map(|c| c.groups.join(", ")))
-                            .unwrap_or_else(|| "—".to_string()),
+                            .unwrap_or_else(|| UNSET.to_string()),
                         "Enter edit",
                     ),
                     ConfirmField::From => (
@@ -1949,7 +1972,7 @@ impl App {
                         ov.from
                             .clone()
                             .or_else(|| cfg.map(|c| c.from.clone()))
-                            .unwrap_or_else(|| "—".to_string()),
+                            .unwrap_or_else(|| UNSET.to_string()),
                         "Enter edit",
                     ),
                     ConfirmField::Category => (
@@ -1957,7 +1980,7 @@ impl App {
                         ov.nzb_category
                             .clone()
                             .or_else(|| cfg.and_then(|c| c.nzb_category.clone()))
-                            .unwrap_or_else(|| "—".to_string()),
+                            .unwrap_or_else(|| UNSET.to_string()),
                         "Enter edit",
                     ),
                     ConfirmField::ArticleSize => {
@@ -1975,9 +1998,9 @@ impl App {
     /// One-line explanation of the current obfuscation mode, for the panel.
     pub fn obfuscate_legend(&self) -> &'static str {
         match self.obf_effective() {
-            ObfuscateMode::None => "none: public subject + real filenames",
-            ObfuscateMode::Subject => "subject: random subject, real poster + filenames",
-            ObfuscateMode::Full => "full: random subject + poster + filenames",
+            ObfuscateMode::None => "None: public subject + real filenames",
+            ObfuscateMode::Subject => "Subject: random subject, real poster + filenames",
+            ObfuscateMode::Full => "Full: random subject + poster + filenames",
         }
     }
 

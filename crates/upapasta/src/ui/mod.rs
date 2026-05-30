@@ -1,5 +1,4 @@
 use crate::app::{App, AppState};
-use pesto::config::ObfuscateMode;
 pub mod components;
 pub mod theme;
 
@@ -1425,12 +1424,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
     let ov = &app.config_state.overrides;
 
     let masked = |s: &str| "*".repeat(s.len().min(12));
-
-    let obf_str = |m: ObfuscateMode| match m {
-        ObfuscateMode::None => "none",
-        ObfuscateMode::Subject => "subject",
-        ObfuscateMode::Full => "full",
-    };
+    use crate::app::{obf_label, on_off, UNSET};
 
     vec![
         ConfigField {
@@ -1439,7 +1433,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .from
                 .clone()
                 .or_else(|| cfg.map(|c| c.from.clone()))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Sender address in posted articles",
             has_override: ov.from.is_some(),
         },
@@ -1449,7 +1443,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .groups
                 .clone()
                 .or_else(|| cfg.map(|c| c.groups.join(", ")))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Comma-separated newsgroup list",
             has_override: ov.groups.is_some(),
         },
@@ -1457,11 +1451,11 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
             label: "Obfuscate",
             value: ov
                 .obfuscate
-                .map(obf_str)
-                .or_else(|| cfg.map(|c| obf_str(c.obfuscate)))
-                .unwrap_or("none")
+                .map(obf_label)
+                .or_else(|| cfg.map(|c| obf_label(c.obfuscate)))
+                .unwrap_or("None")
                 .to_string(),
-            hint: "Enter/e cycles: none → subject → full",
+            hint: "Enter/e cycles: None → Subject → Full",
             has_override: ov.obfuscate.is_some(),
         },
         ConfigField {
@@ -1488,9 +1482,9 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
             label: "Verify",
             value: ov
                 .verify
-                .map(|v| if v { "true" } else { "false" })
-                .or_else(|| cfg.map(|c| if c.verify { "true" } else { "false" }))
-                .unwrap_or("false")
+                .map(on_off)
+                .or_else(|| cfg.map(|c| on_off(c.verify)))
+                .unwrap_or("Off")
                 .to_string(),
             hint: "Enter/e toggles: STAT-check each article after posting",
             has_override: ov.verify.is_some(),
@@ -1502,7 +1496,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .as_deref()
                 .map(masked)
                 .or_else(|| cfg.and_then(|c| c.nzb_password.as_deref()).map(masked))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Extraction password in the NZB <meta>",
             has_override: ov.nzb_password.is_some(),
         },
@@ -1512,7 +1506,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .nzb_category
                 .clone()
                 .or_else(|| cfg.and_then(|c| c.nzb_category.clone()))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Category tag in the NZB (e.g. Movies > HD)",
             has_override: ov.nzb_category.is_some(),
         },
@@ -1523,7 +1517,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .as_deref()
                 .map(masked)
                 .or_else(|| cfg.and_then(|c| c.compress_password.as_deref()).map(masked))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Password for RAR/ZIP compression",
             has_override: ov.compress_password.is_some(),
         },
@@ -1540,7 +1534,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .url_override
                 .clone()
                 .or_else(|| cfg?.indexer_url.clone())
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "Base URL, e.g. http://localhost:9696",
             has_override: app.prowlarr.url_override.is_some(),
         },
@@ -1552,7 +1546,7 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
                 .as_deref()
                 .map(masked)
                 .or_else(|| cfg?.indexer_api_key.as_deref().map(masked))
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| UNSET.into()),
             hint: "API key from Prowlarr Settings > General",
             has_override: app.prowlarr.api_key_override.is_some(),
         },
