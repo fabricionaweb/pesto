@@ -88,6 +88,12 @@ pub enum AppEvent {
     UploadError(String),
     // Periodic UI tick
     Tick,
+    // A background directory scan finished: per-item (path, backed, size). The
+    // generation lets the FileTree drop results for a directory it already left.
+    DirScanReady {
+        generation: u64,
+        results: Vec<(std::path::PathBuf, bool, u64)>,
+    },
     // A single queue item started uploading (sequential, one NZB at a time).
     ItemUploadStarted {
         path: String,

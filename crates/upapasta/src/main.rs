@@ -593,8 +593,29 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::Tick => {
                     app.tick_count = app.tick_count.wrapping_add(1);
                 }
+                AppEvent::DirScanReady {
+                    generation,
+                    results,
+                } => {
+                    app.file_tree.apply_scan(generation, results);
+                }
                 _ => {}
             }
+        }
+
+        // Off-thread directory scan: the Browser's backed/size summary needs
+        // recursive filesystem walks that would otherwise freeze the UI loop
+        // while navigating large folders. Hand any pending scan to a blocking
+        // worker and fold the result back in via DirScanReady.
+        if let Some(job) = app.file_tree.take_scan_job() {
+            let tx_scan = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let (generation, results) = job.run();
+                let _ = tx_scan.send(AppEvent::DirScanReady {
+                    generation,
+                    results,
+                });
+            });
         }
 
         // Small sleep to avoid busy-looping the draw thread
