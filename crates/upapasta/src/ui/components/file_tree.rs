@@ -53,6 +53,50 @@ pub struct FileTree {
     scroll_offset: usize,
     /// Number of items that fit in the last rendered area; updated at render time.
     visible_height: usize,
+    /// Per-item scan result `(backed, upload_size_bytes)`, keyed by item path.
+    /// Computed off the UI thread (see [`DirScanJob`]) and delivered via
+    /// [`apply_scan`]. A missing key means "not scanned yet".
+    scan_cache: HashMap<PathBuf, (bool, u64)>,
+    /// Monotonic scan id. A delivered scan is applied only if it still matches
+    /// the current generation, so results for a directory we already left (or a
+    /// stale `nzb_status`) are discarded.
+    scan_generation: u64,
+    /// Set whenever a fresh background scan is needed (after navigation or a
+    /// catalog change); consumed by [`take_scan_job`].
+    scan_pending: bool,
+    /// False until the scan for the current generation has been applied. The
+    /// summary line shows a "scanning…" hint until then.
+    summary_ready: bool,
+}
+
+/// A directory scan handed off to a blocking worker. It owns a snapshot of the
+/// item list and catalog status so the (recursive, blocking) filesystem walks
+/// run entirely off the UI thread.
+#[derive(Debug)]
+pub struct DirScanJob {
+    pub generation: u64,
+    items: Vec<PathBuf>,
+    nzb_status: HashMap<String, NzbStatusEntry>,
+}
+
+impl DirScanJob {
+    /// Run the blocking filesystem walk for every item. Safe to call on a
+    /// blocking thread; it never touches the UI. Returns the per-item
+    /// `(path, backed, upload_size)` triples plus the generation it was for.
+    pub fn run(self) -> (u64, Vec<(PathBuf, bool, u64)>) {
+        let results = self
+            .items
+            .into_iter()
+            .map(|p| {
+                let backed = path_is_backed(&p, &self.nzb_status);
+                // Only unbacked items contribute to the "to upload" byte total,
+                // so skip the (expensive) size walk for backed ones.
+                let size = if backed { 0 } else { item_size(&p) };
+                (p, backed, size)
+            })
+            .collect();
+        (self.generation, results)
+    }
 }
 
 impl FileTree {
@@ -70,6 +114,10 @@ impl FileTree {
             uploading: HashSet::new(),
             scroll_offset: 0,
             visible_height: 20,
+            scan_cache: HashMap::new(),
+            scan_generation: 0,
+            scan_pending: false,
+            summary_ready: false,
         };
         tree.refresh();
         tree
@@ -79,6 +127,9 @@ impl FileTree {
     /// and the unbacked filter depend on it, so recompute both.
     pub fn set_nzb_status(&mut self, status: HashMap<String, NzbStatusEntry>) {
         self.nzb_status = status;
+        // Backed status depends on the catalog, so the cache is now stale:
+        // schedule a fresh background scan instead of walking here.
+        self.invalidate_scan();
         self.recompute_summary();
         self.apply_filter();
     }
@@ -194,9 +245,52 @@ impl FileTree {
             });
 
             self.all_items = items;
+            // The listing changed: the cached backed/size info no longer
+            // matches, so request a fresh off-thread scan. `recompute_summary`
+            // and `apply_filter` stay cheap (cache lookups); the real numbers
+            // arrive later via `apply_scan`.
+            self.invalidate_scan();
             self.recompute_summary();
             self.apply_filter();
         }
+    }
+
+    /// Mark the current listing as needing a fresh background scan. Bumps the
+    /// generation so any in-flight scan for the previous state is discarded.
+    fn invalidate_scan(&mut self) {
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        self.scan_pending = true;
+        self.summary_ready = false;
+    }
+
+    /// Hand off the pending directory scan, if any. The caller runs
+    /// [`DirScanJob::run`] on a blocking thread and returns the result through
+    /// [`apply_scan`]. Returns `None` when no scan is pending.
+    pub fn take_scan_job(&mut self) -> Option<DirScanJob> {
+        if !self.scan_pending {
+            return None;
+        }
+        self.scan_pending = false;
+        Some(DirScanJob {
+            generation: self.scan_generation,
+            items: self.all_items.clone(),
+            nzb_status: self.nzb_status.clone(),
+        })
+    }
+
+    /// Apply a completed background scan. Stale results (a newer navigation or
+    /// catalog change bumped the generation) are ignored.
+    pub fn apply_scan(&mut self, generation: u64, results: Vec<(PathBuf, bool, u64)>) {
+        if generation != self.scan_generation {
+            return;
+        }
+        self.scan_cache = results
+            .into_iter()
+            .map(|(p, backed, size)| (p, (backed, size)))
+            .collect();
+        self.summary_ready = true;
+        self.recompute_summary();
+        self.apply_filter();
     }
 
     /// Rebuild `items` from `all_items`, honoring the unbacked filter, and clamp
@@ -227,14 +321,22 @@ impl FileTree {
 
     /// Recompute the `(total, unbacked, bytes-to-upload)` summary for the
     /// current directory listing.
+    ///
+    /// Reads from `scan_cache`; an item not yet scanned counts as unbacked with
+    /// zero size. While `summary_ready` is false the render path shows a
+    /// "scanning…" hint instead of these provisional numbers.
     fn recompute_summary(&mut self) {
         let total = self.all_items.len();
         let mut unbacked = 0usize;
         let mut bytes = 0u64;
         for p in &self.all_items {
-            if !self.is_backed(p) {
-                unbacked += 1;
-                bytes += item_size(p);
+            match self.scan_cache.get(p) {
+                Some((true, _)) => {}
+                Some((false, size)) => {
+                    unbacked += 1;
+                    bytes += size;
+                }
+                None => unbacked += 1,
             }
         }
         self.summary = (total, unbacked, bytes);
@@ -245,25 +347,14 @@ impl FileTree {
         self.summary
     }
 
-    /// Whether a path is already backed up (has an NZB in the catalog).
-    ///
-    /// A file is backed when it is in the catalog by full path or base name.
-    /// A directory is backed when it was uploaded as a release (its folder name
-    /// is in the catalog) *or* every file under it is individually backed —
-    /// i.e. it is unbacked if any child still needs uploading.
+    /// Whether a path is already backed up, from the most recent background
+    /// scan. An item not yet scanned is treated as *not* backed so it stays
+    /// visible (and counted) until the real result arrives.
     fn is_backed(&self, path: &Path) -> bool {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let full = path.to_string_lossy();
-        if self.nzb_status.contains_key(full.as_ref()) || self.nzb_status.contains_key(name) {
-            return true;
-        }
-        if path.is_dir() {
-            return !dir_has_unbacked(path, &self.nzb_status);
-        }
-        false
+        self.scan_cache
+            .get(path)
+            .map(|(backed, _)| *backed)
+            .unwrap_or(false)
     }
 
     pub fn go_to_parent(&mut self) {
@@ -380,7 +471,9 @@ impl FileTree {
         };
 
         let (total, unbacked, bytes) = self.summary;
-        let summary = if unbacked > 0 {
+        let summary = if !self.summary_ready && total > 0 {
+            " — scanning…".to_string()
+        } else if unbacked > 0 {
             format!(" — {} unbacked · {} to upload", unbacked, fmt_bytes(bytes))
         } else if total > 0 {
             " — all backed ✓".to_string()
@@ -455,6 +548,29 @@ fn fmt_bytes(bytes: u64) -> String {
     }
 }
 
+/// Whether a path is already backed up (has an NZB in the catalog).
+///
+/// A file is backed when it is in the catalog by full path or base name. A
+/// directory is backed when it was uploaded as a release (its folder name is in
+/// the catalog) *or* every file under it is individually backed — i.e. it is
+/// unbacked if any child still needs uploading. The directory case walks the
+/// subtree, so this runs on a blocking worker (see [`DirScanJob::run`]), never
+/// on the UI thread.
+fn path_is_backed(path: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let full = path.to_string_lossy();
+    if nzb_status.contains_key(full.as_ref()) || nzb_status.contains_key(name) {
+        return true;
+    }
+    if path.is_dir() {
+        return !dir_has_unbacked(path, nzb_status);
+    }
+    false
+}
+
 /// Whether `dir` contains at least one file (recursively) that is not in the
 /// catalog by its base name. Walks with a cap and stops at the first hit, so a
 /// huge tree cannot stall the UI. Symlinks are skipped (as `pesto::walk` does).
@@ -526,7 +642,8 @@ fn item_size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_bytes;
+    use super::{fmt_bytes, FileTree};
+    use std::fs;
 
     #[test]
     fn fmt_bytes_scales_units() {
@@ -535,5 +652,54 @@ mod tests {
         assert_eq!(fmt_bytes(1024), "1.0 KB");
         assert_eq!(fmt_bytes(1536), "1.5 KB");
         assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    /// refresh() must stay off the filesystem-walk path: a scan is pending and
+    /// the summary is not ready until the background job is applied.
+    #[test]
+    fn refresh_defers_summary_to_background_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.bin"), [0u8; 100]).unwrap();
+        fs::write(dir.path().join("b.bin"), [0u8; 50]).unwrap();
+
+        let mut tree = FileTree::new();
+        tree.current_dir = dir.path().to_path_buf();
+        tree.refresh();
+
+        // Listing is available immediately, but the backed/size numbers are not.
+        assert_eq!(tree.items.len(), 2);
+        assert!(!tree.summary_ready);
+
+        // Run the deferred job (as the blocking worker would) and fold it back.
+        let job = tree.take_scan_job().expect("a scan should be pending");
+        let (generation, results) = job.run();
+        tree.apply_scan(generation, results);
+
+        assert!(tree.summary_ready);
+        // Nothing in the (empty) catalog, so both files are unbacked: 2 items,
+        // 2 unbacked, 150 bytes to upload.
+        assert_eq!(tree.summary(), (2, 2, 150));
+    }
+
+    /// A scan whose generation was superseded (e.g. the user navigated away)
+    /// must be discarded rather than overwriting the current directory's state.
+    #[test]
+    fn stale_scan_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.bin"), [0u8; 10]).unwrap();
+
+        let mut tree = FileTree::new();
+        tree.current_dir = dir.path().to_path_buf();
+        tree.refresh();
+        let job = tree.take_scan_job().expect("a scan should be pending");
+        let (stale_gen, results) = job.run();
+
+        // Simulate navigating away before the scan returned.
+        tree.refresh();
+        tree.apply_scan(stale_gen, results);
+
+        // The stale result was dropped, so we are still waiting on the fresh one.
+        assert!(!tree.summary_ready);
+        assert!(tree.scan_pending);
     }
 }
