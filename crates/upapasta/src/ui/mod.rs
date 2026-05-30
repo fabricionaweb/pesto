@@ -97,6 +97,7 @@ fn draw_header(f: &mut Frame, area: Rect) {
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let titles = vec![
         " Dashboard ",
+        " Queue ",
         " Browser ",
         " History ",
         " NZB Vault ",
@@ -104,10 +105,11 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     ];
     let selected = match app.state {
         AppState::Dashboard => 0,
-        AppState::Browser => 1,
-        AppState::History => 2,
-        AppState::NzbVault => 3,
-        AppState::Config => 4,
+        AppState::Queue => 1,
+        AppState::Browser => 2,
+        AppState::History => 3,
+        AppState::NzbVault => 4,
+        AppState::Config => 5,
     };
 
     let tabs = Tabs::new(titles)
@@ -130,6 +132,9 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         }
         AppState::Dashboard => {
             draw_dashboard(f, app, area);
+        }
+        AppState::Queue => {
+            draw_queue(f, app, area);
         }
         AppState::History => {
             draw_history(f, app, area);
@@ -280,28 +285,50 @@ fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 
         (Some(NzbBadge::Marked), Some(path)) => {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-            let lines = vec![
+            let info = app.queue_info(&path.to_string_lossy());
+            let mut lines = vec![
                 Line::from(vec![
-                    Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        if info.is_dir {
+                            " Folder  "
+                        } else {
+                            " File    "
+                        },
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::raw(name.to_string()),
                 ]),
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Marked for upload",
+                    " ✓ Queued for upload",
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    " Press u to open the upload panel",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled(
-                    " Press Space to unmark",
-                    Style::default().fg(Color::DarkGray),
-                )),
             ];
+            if info.is_dir {
+                lines.push(Line::from(vec![
+                    Span::styled(" NZB     ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!(
+                        "{}.nzb  ({} files in one release)",
+                        info.nzb_name, info.file_count
+                    )),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(" NZB     ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{}.nzb", info.nzb_name)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " Press u to open the upload panel",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                " Press Space to unqueue",
+                Style::default().fg(Color::DarkGray),
+            )));
             (" NZB Status ".to_string(), lines)
         }
 
@@ -409,10 +436,7 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let name = std::path::Path::new(item)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(item);
+            let info = app.queue_info(item);
             let style = if i == app.upload_queue.selected {
                 Style::default()
                     .fg(Color::Yellow)
@@ -420,9 +444,28 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
+            let (status_glyph, status_color) = match app.item_status(item) {
+                crate::app::FileStatus::Active => ("▶ ", Color::Cyan),
+                crate::app::FileStatus::Done => ("✓ ", Color::Green),
+                crate::app::FileStatus::Failed => ("✗ ", Color::Red),
+                crate::app::FileStatus::Pending => {
+                    if app.upload_in_progress {
+                        ("· ", Color::DarkGray)
+                    } else {
+                        ("○ ", Color::DarkGray)
+                    }
+                }
+            };
+            let (icon, suffix) = if info.is_dir {
+                ("📁 ", format!("  ({} files → 1 NZB)", info.file_count))
+            } else {
+                ("📄 ", String::new())
+            };
             ratatui::widgets::ListItem::new(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(name.to_string(), style),
+                Span::styled(status_glyph, Style::default().fg(status_color)),
+                Span::styled(icon, Style::default()),
+                Span::styled(info.nzb_name, style),
+                Span::styled(suffix, Style::default().fg(Color::DarkGray)),
             ]))
         })
         .collect();
@@ -439,6 +482,113 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
     if !app.upload_queue.items.is_empty() {
         state.select(Some(app.upload_queue.selected));
     }
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+/// Dedicated full-height Queue screen (F2): the single home for reviewing,
+/// reordering, removing and launching the upload queue built in the Browser.
+fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::app::FileStatus;
+
+    // When the upload config panel is open (after `u`), it takes over the area.
+    if app.show_upload_confirm {
+        draw_upload_config_panel(f, app, area);
+        return;
+    }
+
+    if app.upload_queue.items.is_empty() {
+        let empty = Paragraph::new(
+            "The upload queue is empty.\n\n\
+             Go to the Browser tab (Tab / F3) →\n\
+             navigate with j/k, Enter to open a folder →\n\
+             press Space to queue a file or folder →\n\
+             come back here (F2) to review and upload.",
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Upload Queue (empty) "),
+        );
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let mut total_bytes = 0u64;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+    let items: Vec<ListItem> = app
+        .upload_queue
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let info = app.queue_info(item);
+            total_bytes += info.size_bytes;
+            let status = app.item_status(item);
+            match status {
+                FileStatus::Done => done += 1,
+                FileStatus::Failed => failed += 1,
+                _ => {}
+            }
+            let (glyph, color) = match status {
+                FileStatus::Active => ("▶", Color::Cyan),
+                FileStatus::Done => ("✓", Color::Green),
+                FileStatus::Failed => ("✗", Color::Red),
+                FileStatus::Pending => {
+                    if app.upload_in_progress {
+                        ("·", Color::DarkGray)
+                    } else {
+                        ("○", Color::DarkGray)
+                    }
+                }
+            };
+            let icon = if info.is_dir { "📁" } else { "📄" };
+            let detail = if info.is_dir {
+                format!("  {} files → 1 NZB", info.file_count)
+            } else {
+                String::new()
+            };
+            let name_style = if i == app.upload_queue.selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", glyph), Style::default().fg(color)),
+                Span::raw(format!("{} ", icon)),
+                Span::styled(info.nzb_name, name_style),
+                Span::styled(detail, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  ({})", format_bytes(info.size_bytes)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+
+    let n = app.upload_queue.items.len();
+    let title = if app.upload_in_progress {
+        format!(" Upload Queue ({n}) — {done} done · {failed} failed ")
+    } else {
+        format!(" Upload Queue ({n}) — {} total ", format_bytes(total_bytes))
+    };
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default();
+    state.select(Some(app.upload_queue.selected));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -483,19 +633,28 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .take(6)
         .map(|p| {
+            let info = app.queue_info(p);
+            let suffix = if info.is_dir {
+                format!(" → {}.nzb ({} files)", info.nzb_name, info.file_count)
+            } else {
+                format!(" → {}.nzb", info.nzb_name)
+            };
+            let icon = if info.is_dir { "📁 " } else { "📄 " };
             let name = std::path::Path::new(p)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(p);
-            let max = (vchunks[0].width as usize).saturating_sub(4);
+            let prefix_len = icon.chars().count() + suffix.chars().count();
+            let max = (vchunks[0].width as usize).saturating_sub(prefix_len + 2);
             let short = if name.len() > max && max > 3 {
                 format!("{}…", &name[..max - 1])
             } else {
                 name.to_string()
             };
             Line::from(vec![
-                Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                Span::styled(icon, Style::default().fg(Color::DarkGray)),
                 Span::raw(short),
+                Span::styled(suffix, Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
@@ -709,9 +868,9 @@ fn draw_dashboard_idle(f: &mut Frame, app: &mut App, area: Rect) {
         let idle = Paragraph::new(
             "No files in queue.\n\n\
              Go to Browser tab (Tab) →\n\
-             navigate with j/k/Enter →\n\
-             mark with Space →\n\
-             press u to queue & upload.",
+             navigate with j/k, Enter to open →\n\
+             queue a file or folder with Space →\n\
+             press u to upload.",
         )
         .block(
             Block::default()
@@ -898,7 +1057,6 @@ fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
     let p = &app.progress;
-    let is_paused = app.upload_paused;
 
     let upload_pct = p.progress_pct() as u16;
 
@@ -913,33 +1071,21 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
         "ETA --:--".to_string()
     };
 
-    let label = if is_paused {
-        "PAUSED".to_string()
-    } else {
-        format!(
-            "{}%  {} / {}  {}  {}",
-            upload_pct,
-            pesto::progress::format_size(p.done_bytes),
-            pesto::progress::format_size(p.total_bytes),
-            speed_str,
-            eta_str,
-        )
-    };
+    let label = format!(
+        "{}%  {} / {}  {}  {}",
+        upload_pct,
+        pesto::progress::format_size(p.done_bytes),
+        pesto::progress::format_size(p.total_bytes),
+        speed_str,
+        eta_str,
+    );
 
-    let gauge_style = if is_paused {
-        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-    } else {
-        Style::default()
-            .fg(Color::Green)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    };
+    let gauge_style = Style::default()
+        .fg(Color::Green)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
 
-    let title = if is_paused {
-        " UPLOAD — PAUSED  [p: resume  x: cancel] "
-    } else {
-        " UPLOAD  [p: pause  x: cancel] "
-    };
+    let title = " UPLOAD  [x: cancel] ";
 
     let gauge = Gauge::default()
         .block(
@@ -962,7 +1108,6 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_speed_sparkline(f: &mut Frame, app: &App, area: Rect) {
     let p = &app.progress;
     let spark_data: Vec<u64> = p.speed_history.iter().map(|&s| (s * 10.0) as u64).collect();
-    let is_paused = app.upload_paused;
 
     let sparkline = Sparkline::default()
         .block(
@@ -971,11 +1116,7 @@ fn draw_speed_sparkline(f: &mut Frame, app: &App, area: Rect) {
                 .title(format!(" Speed history ({} samples) ", spark_data.len())),
         )
         .data(&spark_data)
-        .style(if is_paused {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::Cyan)
-        });
+        .style(Style::default().fg(Color::Cyan));
     f.render_widget(sparkline, area);
 }
 
@@ -1029,12 +1170,17 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
         let name_row = rows[i * 2];
         let gauge_row = rows[i * 2 + 1];
 
-        // Name line with status icon
+        // Name line with status icon. fp.name is the queue path; show its
+        // basename so a long absolute path does not crowd the gauge.
+        let display_name = std::path::Path::new(&fp.name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&fp.name);
         let max_name = (name_row.width as usize).saturating_sub(4);
-        let short_name = if fp.name.len() > max_name && max_name > 3 {
-            format!("{}…", &fp.name[..max_name - 1])
+        let short_name = if display_name.len() > max_name && max_name > 3 {
+            format!("{}…", &display_name[..max_name - 1])
         } else {
-            fp.name.clone()
+            display_name.to_string()
         };
         let name_line = Line::from(vec![
             Span::styled(
@@ -1113,14 +1259,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if app.upload_in_progress {
-        let pause_resume = if app.upload_paused {
-            "p: resume"
-        } else {
-            "p: pause"
-        };
         let help = format!(
-            "{}  •  {}  •  x: cancel  •  Tab: switch  •  q: quit",
-            app.status_bar.message, pause_resume
+            "{}  •  x: cancel  •  Tab: switch  •  q: quit",
+            app.status_bar.message
         );
         let status = Paragraph::new(help)
             .style(Style::default().fg(Color::DarkGray))
@@ -1129,23 +1270,34 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    if app.state == AppState::Queue && !app.upload_queue.items.is_empty() {
+        let hint = format!(
+            "{}  •  u: upload  •  d: remove  •  c: clear  •  J/K: reorder  •  Tab: switch",
+            app.status_bar.message
+        );
+        let status = Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::TOP).title(" Status "));
+        f.render_widget(status, area);
+        return;
+    }
+
     if app.state == AppState::Browser {
         let n = app.upload_queue.items.len();
-        let marked = app.file_tree.marked_count();
-        let hint = if marked > 0 {
+        let filter_hint = if app.file_tree.filter_unbacked {
+            "n: show all"
+        } else {
+            "n: unbacked only"
+        };
+        let hint = if n > 0 {
             format!(
-                "{}  •  Space: mark ({} marked)  •  u: queue & upload  •  Enter: navigate  •  Tab: switch",
-                app.status_bar.message, marked
-            )
-        } else if n > 0 {
-            format!(
-                "{}  •  Space: mark files  •  u: upload queue ({} items)  •  Tab: switch",
-                app.status_bar.message, n
+                "{}  •  Space: queue/unqueue  •  u: upload ({} queued)  •  {}  •  Tab: switch",
+                app.status_bar.message, n, filter_hint
             )
         } else {
             format!(
-                "{}  •  Space: mark files  •  Enter: navigate  •  Tab: switch  •  q: quit",
-                app.status_bar.message
+                "{}  •  Space: queue file/folder  •  {}  •  Enter: open  •  Tab: switch",
+                app.status_bar.message, filter_hint
             )
         };
         let status = Paragraph::new(hint)

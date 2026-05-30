@@ -1,5 +1,6 @@
 use std::{
     io, path::PathBuf, sync::atomic::AtomicBool, sync::atomic::Ordering, sync::Arc, time::Duration,
+    time::Instant,
 };
 
 use crossterm::{
@@ -39,6 +40,7 @@ async fn main() -> io::Result<()> {
         .await
         .expect("App::new panicked");
     app.load_upload_prefs();
+    app.load_queue();
 
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -123,22 +125,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.refresh_history();
                         }
                     }
-                    // F1–F5: direct tab jump
+                    // F1–F6: direct tab jump
                     KeyCode::F(1) => {
                         app.state = app::AppState::Dashboard;
                     }
                     KeyCode::F(2) => {
-                        app.state = app::AppState::Browser;
+                        app.state = app::AppState::Queue;
                     }
                     KeyCode::F(3) => {
+                        app.state = app::AppState::Browser;
+                    }
+                    KeyCode::F(4) => {
                         app.state = app::AppState::History;
                         app.refresh_history();
                     }
-                    KeyCode::F(4) => {
+                    KeyCode::F(5) => {
                         app.state = app::AppState::NzbVault;
                         app.load_vault();
                     }
-                    KeyCode::F(5) => {
+                    KeyCode::F(6) => {
                         app.state = app::AppState::Config;
                     }
                     // ── Upload config panel (text-edit mode takes priority) ──
@@ -206,27 +211,22 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Up | KeyCode::Char('k') => app.file_tree.select_previous(),
                         KeyCode::Down | KeyCode::Char('j') => app.file_tree.select_next(),
                         KeyCode::Char(' ') => {
-                            // Space: mark/unmark current item and advance cursor
-                            app.file_tree.toggle_mark();
-                            let n = app.file_tree.marked_count();
-                            app.status_bar
-                                .set(format!("{} item(s) marked — press u to queue & upload", n));
+                            // Space is the single selection action: queue/unqueue
+                            // the item under the cursor (file or folder), then
+                            // advance. The queue is the one source of truth.
+                            app.toggle_queue_at_cursor();
                         }
                         KeyCode::Enter => {
+                            // Enter is navigation only and never touches the
+                            // queue: enter a directory, or (on a file) just keep
+                            // the detail panel focused on it. Use Space to queue.
                             if let Some(selected) = app.file_tree.get_selected().cloned() {
                                 if selected.is_dir() {
                                     app.file_tree.current_dir = selected;
                                     app.file_tree.refresh();
                                     app.file_tree.selected = 0;
                                 } else {
-                                    let path_str = selected.to_string_lossy().to_string();
-                                    if app.upload_queue.items.contains(&path_str) {
-                                        app.upload_queue.items.retain(|p| p != &path_str);
-                                        app.status_bar.set("Removed from queue");
-                                        app.log_panel.push(format!("Removed: {}", path_str));
-                                    } else {
-                                        app.add_to_queue(path_str);
-                                    }
+                                    app.status_bar.set("Press Space to queue/unqueue this file");
                                 }
                             }
                         }
@@ -234,11 +234,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.file_tree.go_to_parent();
                         }
                         KeyCode::Char('u') => {
-                            // Queue all marked items first
-                            let marked = app.file_tree.take_marked();
-                            for p in marked {
-                                app.add_to_queue(p.to_string_lossy().to_string());
-                            }
+                            // The queue already reflects everything marked with
+                            // Space, so just open the config panel.
                             if app.upload_queue.items.is_empty() {
                                 app.status_bar
                                     .set("Queue is empty — mark files with Space first");
@@ -246,21 +243,68 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.show_upload_confirm = true;
                             }
                         }
+                        KeyCode::Char('n') => {
+                            // Toggle "show only items without an NZB yet".
+                            app.file_tree.toggle_filter_unbacked();
+                            let (_, unbacked, _) = app.file_tree.summary();
+                            if app.file_tree.filter_unbacked {
+                                app.status_bar.set(format!(
+                                    "Showing {} item(s) that still need uploading (n to show all)",
+                                    unbacked
+                                ));
+                            } else {
+                                app.status_bar.set("Showing all items");
+                            }
+                        }
                         KeyCode::Char('P') => {
                             trigger_prowlarr_search(app, tx.clone());
                         }
                         _ => {}
                     },
-                    KeyCode::Char('u')
-                        if app.state == app::AppState::Dashboard && !app.log_panel.searching =>
-                    {
-                        if app.upload_queue.items.is_empty() {
-                            app.status_bar
-                                .set("Queue is empty — go to Browser and mark files with Space");
-                        } else {
-                            app.show_upload_confirm = true;
+                    // ── Queue screen keys (the home for queue management) ───
+                    _ if app.state == app::AppState::Queue => match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => app.upload_queue.select_previous(),
+                        KeyCode::Down | KeyCode::Char('j') => app.upload_queue.select_next(),
+                        KeyCode::Char('u') => {
+                            if app.upload_queue.items.is_empty() {
+                                app.status_bar.set(
+                                    "Queue is empty — go to Browser (F3) and mark files with Space",
+                                );
+                            } else if app.upload_in_progress {
+                                app.status_bar.set("Upload already running");
+                            } else {
+                                app.show_upload_confirm = true;
+                            }
                         }
-                    }
+                        KeyCode::Char('d') | KeyCode::Delete => {
+                            if app.upload_in_progress {
+                                app.status_bar.set("Cannot edit the queue during upload");
+                            } else if let Some(removed) = app.remove_queue_selected() {
+                                app.status_bar.set(format!("Removed: {}", removed));
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            if app.upload_in_progress {
+                                app.status_bar.set("Cannot edit the queue during upload");
+                            } else {
+                                let count = app.clear_queue();
+                                app.status_bar
+                                    .set(format!("Cleared {} items from queue", count));
+                            }
+                        }
+                        KeyCode::Char('J') if !app.upload_in_progress => {
+                            app.upload_queue.move_selected_down();
+                            app.save_queue();
+                        }
+                        KeyCode::Char('K') if !app.upload_in_progress => {
+                            app.upload_queue.move_selected_up();
+                            app.save_queue();
+                        }
+                        KeyCode::Char('x') if app.upload_in_progress => {
+                            app.cancel_upload();
+                        }
+                        _ => {}
+                    },
                     // ── Log panel search (Dashboard) ───────────────────────
                     _ if app.state == app::AppState::Dashboard && app.log_panel.searching => {
                         match key.code {
@@ -298,60 +342,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                     {
                         app.log_panel.toggle_auto_scroll();
                     }
-                    // Queue management on Dashboard
-                    KeyCode::Char('d') | KeyCode::Delete
-                        if app.state == app::AppState::Dashboard =>
-                    {
-                        if let Some(removed) = app.upload_queue.remove_selected() {
-                            app.status_bar.set(format!("Removed: {}", removed));
-                            app.log_panel
-                                .push(format!("Removed from queue: {}", removed));
-                            if app.upload_queue.items.is_empty() {
-                                app.upload_in_progress = false;
-                            }
-                        }
-                    }
-                    KeyCode::Char('c') if app.state == app::AppState::Dashboard => {
-                        let count = app.upload_queue.items.len();
-                        app.upload_queue.clear();
-                        app.status_bar
-                            .set(format!("Cleared {} items from queue", count));
-                        app.log_panel.push("Upload queue cleared".to_string());
-                        app.upload_in_progress = false;
-                    }
-                    // Cancel current upload
+                    // Cancel current upload (Dashboard shows the live progress)
                     KeyCode::Char('x')
                         if app.state == app::AppState::Dashboard && app.upload_in_progress =>
                     {
                         app.cancel_upload();
-                    }
-                    // Pause / Resume
-                    KeyCode::Char('p')
-                        if app.state == app::AppState::Dashboard && app.upload_in_progress =>
-                    {
-                        app.toggle_pause();
-                        // Send event so the upload task can react (for now UI-only pause)
-                        let _ = tx.send(AppEvent::PauseUpload); // will be improved
-                    }
-                    // Navigate and reorder queue on Dashboard (Shift+J/K = move item)
-                    KeyCode::Char('J')
-                        if app.state == app::AppState::Dashboard && !app.upload_in_progress =>
-                    {
-                        app.upload_queue.move_selected_down();
-                        app.status_bar.set("Moved item down");
-                    }
-                    KeyCode::Char('K')
-                        if app.state == app::AppState::Dashboard && !app.upload_in_progress =>
-                    {
-                        app.upload_queue.move_selected_up();
-                        app.status_bar.set("Moved item up");
-                    }
-                    // Navigate queue selection (no reorder) during upload
-                    KeyCode::Char('J') if app.state == app::AppState::Dashboard => {
-                        app.upload_queue.select_next();
-                    }
-                    KeyCode::Char('K') if app.state == app::AppState::Dashboard => {
-                        app.upload_queue.select_previous();
                     }
                     // ── History screen keys ────────────────────────────────
                     // NZB viewer overlay takes priority when open
@@ -505,13 +500,21 @@ async fn run_app<B: ratatui::backend::Backend>(
                     app.log_panel.push_error(format!("ERROR: {}", msg));
                     app.status_bar.set("Upload error — see logs for details");
                 }
-                AppEvent::ProgressUpdate(update) if !app.upload_paused => {
+                AppEvent::ProgressUpdate(update) => {
                     app.handle_progress_update(update);
                 }
-                AppEvent::PauseUpload => {
-                    // Currently pause is UI-driven; in future we can throttle the worker here
+                AppEvent::ItemUploadStarted { path } => {
+                    app.item_upload_started(&path);
                 }
-                AppEvent::ResumeUpload => {}
+                AppEvent::ItemUploadDone {
+                    path,
+                    success,
+                    size_bytes,
+                    nzb_path,
+                    duration_s,
+                } => {
+                    app.item_upload_done(&path, success, size_bytes, nzb_path, duration_s);
+                }
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
                 }
@@ -748,6 +751,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("file-{}", i + 1));
+            let key = path.to_string_lossy().into_owned();
             if total > 1 {
                 let _ = tx.send(AppEvent::Progress(format!(
                     "=== Upload {}/{}: {} ===",
@@ -756,6 +760,8 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     label
                 )));
             }
+            let _ = tx.send(AppEvent::ItemUploadStarted { path: key.clone() });
+            let item_start = Instant::now();
             let result = run_real_upload(
                 config.clone(),
                 vec![path.clone()],
@@ -765,19 +771,36 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 cancel_token.clone(),
             )
             .await;
+            let duration_s = item_start.elapsed().as_secs_f64();
             match result {
                 Err(ref e) => {
                     let _ = tx.send(AppEvent::UploadError(e.to_string()));
+                    let _ = tx.send(AppEvent::ItemUploadDone {
+                        path: key,
+                        success: false,
+                        size_bytes: 0,
+                        nzb_path: None,
+                        duration_s,
+                    });
                     all_ok = false;
                 }
                 Ok(ref o) if o.cancelled => {
                     any_cancelled = true;
                     break;
                 }
-                Ok(ref o) if o.had_failures => {
-                    all_ok = false;
+                Ok(o) => {
+                    let success = !o.had_failures;
+                    if !success {
+                        all_ok = false;
+                    }
+                    let _ = tx.send(AppEvent::ItemUploadDone {
+                        path: key,
+                        success,
+                        size_bytes: o.total_bytes,
+                        nzb_path: o.nzb_path,
+                        duration_s,
+                    });
                 }
-                Ok(_) => {}
             }
         }
         let _ = tx.send(AppEvent::UploadFinished {
@@ -879,14 +902,12 @@ async fn run_real_upload(
     let paths = entry_paths.clone();
     let lbl = label.clone();
     // Resolve the full NZB output path (dir + stem.nzb) when a subdir is given.
+    // A directory keeps its full name (release names contain dots that are not
+    // extensions); a plain file has a single extension stripped.
     let nzb_override = nzb_out_dir.map(|dir| {
         let stem = entry_paths
             .first()
-            .and_then(|p| p.file_name())
-            .map(|n| {
-                let s = std::path::Path::new(n);
-                s.file_stem().unwrap_or(n).to_string_lossy().into_owned()
-            })
+            .map(|p| app::queue_entry_info(&p.to_string_lossy()).nzb_name)
             .unwrap_or_else(|| label.clone());
         dir.join(format!("{stem}.nzb"))
     });
