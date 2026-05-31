@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-05-30
+
+### Fixed
+- `--each` / `--season`: NZB files for entries with long release names could
+  end up **zero bytes** on disk (the user-visible copy in `--nzb-dir` and the
+  archive copy alike). The history archiver truncated the upload name to 80
+  characters, which dropped the file extension; the resulting
+  `<stamp>_<name>.nzb` path then collided with the canonical archive copy that
+  the NZB is already hard-linked to. `hard_link` failed with `EEXIST` and the
+  `fs::copy` fallback copied the file onto itself — `O_TRUNC` zeroed the shared
+  inode before the source was read. `archive_nzb` now detects when source and
+  destination are the same file (device + inode) and skips the copy entirely.
+
 ## [0.3.9] — 2026-05-27
 
 ### Changed
