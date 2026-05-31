@@ -793,10 +793,15 @@ fn trigger_run_hooks(app: &mut App) {
                     .extension()
                     .map(|x| x.eq_ignore_ascii_case("nzb"))
                     .unwrap_or(false);
-                (
-                    prowlarr::release_name_from_filename(&name).to_string(),
-                    is_nzb.then_some(p),
-                )
+                // A release folder has no extension — stripping one would drop a
+                // group tag like `.DUAL-Kallango`, breaking the release-key match.
+                // Only files carry a container/.nzb extension worth stripping.
+                let release_name = if p.is_dir() {
+                    name.clone()
+                } else {
+                    prowlarr::release_name_from_filename(&name).to_string()
+                };
+                (release_name, is_nzb.then_some(p))
             }
             None => {
                 app.status_bar.set("Nothing selected to run hooks on");
