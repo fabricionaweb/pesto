@@ -455,6 +455,10 @@ pub struct HookPickerState {
     /// A directly selected `.nzb` (Vault entry / `.nzb` file); otherwise the
     /// NZB is resolved from `nzb_dir` by release key when the hook runs.
     pub direct_nzb: Option<PathBuf>,
+    /// The selected media file/folder on disk, when the selection is media (not
+    /// an `.nzb`). Used to generate a `.nfo` via mediainfo when none exists
+    /// next to the `.nzb`, so hooks receive `PESTO_NFO`.
+    pub media_path: Option<PathBuf>,
     /// Executable hook scripts available to run.
     pub hooks: Vec<PathBuf>,
     /// Index of the highlighted hook.
@@ -462,10 +466,16 @@ pub struct HookPickerState {
 }
 
 impl HookPickerState {
-    pub fn new(release_name: String, direct_nzb: Option<PathBuf>, hooks: Vec<PathBuf>) -> Self {
+    pub fn new(
+        release_name: String,
+        direct_nzb: Option<PathBuf>,
+        media_path: Option<PathBuf>,
+        hooks: Vec<PathBuf>,
+    ) -> Self {
         Self {
             release_name,
             direct_nzb,
+            media_path,
             hooks,
             selected: 0,
         }

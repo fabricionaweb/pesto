@@ -771,48 +771,54 @@ fn trigger_run_hooks(app: &mut App) {
     }
 
     // Resolve the selected item to a release name and, when possible, a direct
-    // `.nzb` path (Vault entries and `.nzb` files are already NZBs).
-    let (release_name, direct_nzb): (String, Option<PathBuf>) = match app.state {
-        app::AppState::NzbVault => match app.vault.selected_entry() {
-            Some(e) => (
-                prowlarr::release_name_from_filename(&e.name).to_string(),
-                Some(e.path.clone()),
-            ),
-            None => {
-                app.status_bar.set("Nothing selected to run hooks on");
+    // `.nzb` path (Vault entries and `.nzb` files are already NZBs) plus the
+    // media path on disk (so a `.nfo` can be generated when none exists yet).
+    let (release_name, direct_nzb, media_path): (String, Option<PathBuf>, Option<PathBuf>) =
+        match app.state {
+            app::AppState::NzbVault => match app.vault.selected_entry() {
+                Some(e) => (
+                    prowlarr::release_name_from_filename(&e.name).to_string(),
+                    Some(e.path.clone()),
+                    None,
+                ),
+                None => {
+                    app.status_bar.set("Nothing selected to run hooks on");
+                    return;
+                }
+            },
+            app::AppState::Browser => match app.file_tree.get_selected().cloned() {
+                Some(p) => {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let is_nzb = p
+                        .extension()
+                        .map(|x| x.eq_ignore_ascii_case("nzb"))
+                        .unwrap_or(false);
+                    // A release folder has no extension — stripping one would drop
+                    // a group tag like `.DUAL-Kallango`, breaking the release-key
+                    // match. Only files carry a container/.nzb extension to strip.
+                    let release_name = if p.is_dir() {
+                        name.clone()
+                    } else {
+                        prowlarr::release_name_from_filename(&name).to_string()
+                    };
+                    // The media path is the selection itself, unless it already
+                    // is the `.nzb` (then there's no media to mediainfo).
+                    let media_path = (!is_nzb).then(|| p.clone());
+                    (release_name, is_nzb.then_some(p), media_path)
+                }
+                None => {
+                    app.status_bar.set("Nothing selected to run hooks on");
+                    return;
+                }
+            },
+            _ => {
+                app.status_bar.set("Select a release in Browser or Vault");
                 return;
             }
-        },
-        app::AppState::Browser => match app.file_tree.get_selected().cloned() {
-            Some(p) => {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let is_nzb = p
-                    .extension()
-                    .map(|x| x.eq_ignore_ascii_case("nzb"))
-                    .unwrap_or(false);
-                // A release folder has no extension — stripping one would drop a
-                // group tag like `.DUAL-Kallango`, breaking the release-key match.
-                // Only files carry a container/.nzb extension worth stripping.
-                let release_name = if p.is_dir() {
-                    name.clone()
-                } else {
-                    prowlarr::release_name_from_filename(&name).to_string()
-                };
-                (release_name, is_nzb.then_some(p))
-            }
-            None => {
-                app.status_bar.set("Nothing selected to run hooks on");
-                return;
-            }
-        },
-        _ => {
-            app.status_bar.set("Select a release in Browser or Vault");
-            return;
-        }
-    };
+        };
 
     let hooks = pesto::hooks::list_hook_scripts();
     if hooks.is_empty() {
@@ -821,7 +827,12 @@ fn trigger_run_hooks(app: &mut App) {
         return;
     }
 
-    app.hook_picker = Some(app::HookPickerState::new(release_name, direct_nzb, hooks));
+    app.hook_picker = Some(app::HookPickerState::new(
+        release_name,
+        direct_nzb,
+        media_path,
+        hooks,
+    ));
 }
 
 /// Run the hook chosen in the picker against the selected release.
@@ -846,6 +857,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     let nzb_dir = cfg.nzb_dir.as_deref().map(app::expand_tilde);
     let release_name = picker.release_name;
     let direct_nzb = picker.direct_nzb;
+    let media_path = picker.media_path;
     let hook_label = hook
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -873,7 +885,26 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             return;
         };
 
-        let nfo_path = app::find_sibling_nfo(&nzb_path);
+        // Resolve a `.nfo`: an existing sibling wins; otherwise generate one from
+        // the local media via mediainfo and persist it next to the `.nzb` so the
+        // hook (e.g. Curupira) gets PESTO_NFO. Best-effort — a missing mediainfo
+        // or non-media selection just leaves PESTO_NFO empty as before.
+        let mut nfo_log: Option<String> = None;
+        let nfo_path = app::find_sibling_nfo(&nzb_path).or_else(|| {
+            let media = media_path.as_ref()?;
+            let content = pesto::nfo::generate(std::slice::from_ref(media))?;
+            let dest = nzb_path.with_extension("nfo");
+            match pesto::nfo::write(&dest, &content) {
+                Ok(()) => {
+                    nfo_log = Some(format!("generated .nfo via mediainfo: {}", dest.display()));
+                    Some(dest)
+                }
+                Err(e) => {
+                    nfo_log = Some(format!("could not write .nfo: {e}"));
+                    None
+                }
+            }
+        });
         let total_bytes = std::fs::metadata(&nzb_path).map(|m| m.len()).unwrap_or(0);
 
         let ctx = pesto::hooks::HookContext {
@@ -894,7 +925,10 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .unwrap_or_default(),
         };
 
-        let log = pesto::hooks::run_one_hook(&hook, &ctx);
+        let mut log = pesto::hooks::run_one_hook(&hook, &ctx);
+        if let Some(line) = nfo_log {
+            log.insert(0, line);
+        }
         let _ = tx.send(AppEvent::HooksDone { ok: true, log });
     });
 }
