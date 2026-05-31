@@ -256,77 +256,74 @@ pub async fn run_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Write NZB ────────────────────────────────────────────────────────────
-    let nzb_path: Option<PathBuf> = if outcome.cancelled
-        || outcome.segments.is_empty()
-        || config.dry_run
-        || config.par2_only
-    {
-        None
-    } else if let Some(base) = nzb_base {
-        let out = versioned_nzb_path(&base).await;
-        let nzb_meta = crate::nzb::NzbMeta {
-            name: config.nzb_name.clone().or_else(|| {
-                entry_paths
-                    .first()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-            }),
-            password: config
-                .nzb_password
-                .clone()
-                .or_else(|| effective_password.clone()),
-            category: config.nzb_category.clone(),
-        };
-        let xml = crate::nzb::generate(
-            &config.from,
-            &config.groups,
-            &outcome.segments,
-            &nzb_meta,
-            config.obfuscate == ObfuscateMode::Full,
-        );
-        match tokio::fs::write(&out, &xml).await {
-            Ok(()) => {
-                emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
+    let nzb_path: Option<PathBuf> =
+        if outcome.cancelled || outcome.segments.is_empty() || config.dry_run || config.par2_only {
+            None
+        } else if let Some(base) = nzb_base {
+            let out = versioned_nzb_path(&base).await;
+            let nzb_meta = crate::nzb::NzbMeta {
+                name: config.nzb_name.clone().or_else(|| {
+                    entry_paths
+                        .first()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                }),
+                password: config
+                    .nzb_password
+                    .clone()
+                    .or_else(|| effective_password.clone()),
+                category: config.nzb_category.clone(),
+            };
+            let xml = crate::nzb::generate(
+                &config.from,
+                &config.groups,
+                &outcome.segments,
+                &nzb_meta,
+                config.obfuscate == ObfuscateMode::Full,
+            );
+            match tokio::fs::write(&out, &xml).await {
+                Ok(()) => {
+                    emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
 
-                if write_history && !config.dry_run {
-                    let par2_str;
-                    let par2_pct = if config.par2 > 0 {
-                        par2_str = format!("{}%", config.par2);
-                        Some(par2_str.as_str())
-                    } else {
-                        None
-                    };
-                    crate::history::record_upload(
-                        &crate::history::UploadRecord {
-                            name: entry_label,
-                            obfuscated_name: if config.obfuscate != ObfuscateMode::None {
-                                Some(entry_label)
-                            } else {
-                                None
+                    if write_history && !config.dry_run {
+                        let par2_str;
+                        let par2_pct = if config.par2 > 0 {
+                            par2_str = format!("{}%", config.par2);
+                            Some(par2_str.as_str())
+                        } else {
+                            None
+                        };
+                        crate::history::record_upload(
+                            &crate::history::UploadRecord {
+                                name: entry_label,
+                                obfuscated_name: if config.obfuscate != ObfuscateMode::None {
+                                    Some(entry_label)
+                                } else {
+                                    None
+                                },
+                                password: effective_password.as_deref(),
+                                total_bytes,
+                                group: config.groups.first().map(String::as_str),
+                                server: Some(config.host.as_str()),
+                                par2_redundancy: par2_pct,
+                                duration_secs: upload_start.elapsed().as_secs_f64(),
+                                nzb_path: Some(&out.display().to_string()),
+                                subject: config.nzb_name.as_deref().or(Some(entry_label)),
                             },
-                            password: effective_password.as_deref(),
-                            total_bytes,
-                            group: config.groups.first().map(String::as_str),
-                            server: Some(config.host.as_str()),
-                            par2_redundancy: par2_pct,
-                            duration_secs: upload_start.elapsed().as_secs_f64(),
-                            nzb_path: Some(&out.display().to_string()),
-                            subject: config.nzb_name.as_deref().or(Some(entry_label)),
-                        },
-                        config.history_dir.as_deref(),
-                    );
-                }
+                            config.history_dir.as_deref(),
+                        );
+                    }
 
-                Some(out)
+                    Some(out)
+                }
+                Err(e) => {
+                    emit_status(&progress_tx, format!("failed to write nzb: {e}"));
+                    None
+                }
             }
-            Err(e) => {
-                emit_status(&progress_tx, format!("failed to write nzb: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Notifications ────────────────────────────────────────────────────────
