@@ -152,7 +152,7 @@ pub struct OutputSection {
     pub nzb_password: Option<String>,
     /// Category emitted as `<meta type="category">` in the `.nzb`.
     pub nzb_category: Option<String>,
-    /// Newznab indexer upload configuration.
+    /// Prowlarr connection settings (URL + API key for search/download).
     #[serde(default)]
     pub indexer: IndexerSection,
     /// Shell command to execute after a successful upload.
@@ -170,12 +170,12 @@ pub struct OutputSection {
     pub bell: Option<bool>,
 }
 
+/// Prowlarr connection settings stored under `[output.indexer]` in the TOML.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexerSection {
     pub url: Option<String>,
     pub api_key: Option<String>,
-    pub category: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -245,7 +245,6 @@ pub struct Overrides {
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_dir: Option<String>,
-    pub no_upload: bool,
     pub history: Option<bool>,
     pub notify: Option<bool>,
     pub date: Option<String>,
@@ -300,9 +299,7 @@ pub struct Config {
     pub nzb_category: Option<String>,
     pub indexer_url: Option<String>,
     pub indexer_api_key: Option<String>,
-    pub indexer_category: Option<String>,
     pub nzb_dir: Option<String>,
-    pub no_upload: bool,
     pub history: bool,
     pub history_dir: Option<PathBuf>,
     pub notify_webhook: Option<String>,

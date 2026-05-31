@@ -193,8 +193,6 @@ impl Config {
             nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
-            indexer_category: file.output.indexer.category,
-            no_upload: cli.no_upload,
             history: cli
                 .history
                 .unwrap_or_else(|| file.output.history.unwrap_or(true)),

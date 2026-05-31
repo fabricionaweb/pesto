@@ -1,5 +1,5 @@
-//! Full upload pipeline: compress → post → NZB → history → indexer →
-//! notifications → hooks.
+//! Full upload pipeline: compress → post → NZB → history → notifications →
+//! hooks.
 //!
 //! [`run_upload`] is the single entry point for embedding callers (upapasta).
 //! The `pesto` CLI has its own equivalent in `bin/pesto.rs`; the two will
@@ -315,30 +315,6 @@ pub async fn run_upload(
                         },
                         config.history_dir.as_deref(),
                     );
-                }
-
-                // Upload to indexer if configured.
-                if !config.no_upload {
-                    if let (Some(url), Some(api_key)) =
-                        (&config.indexer_url, &config.indexer_api_key)
-                    {
-                        let nzb_name = out
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "upload.nzb".into());
-                        let cat = config
-                            .indexer_category
-                            .as_deref()
-                            .or(config.nzb_category.as_deref());
-                        match crate::indexer::upload_nzb(url, api_key, cat, &nzb_name, xml).await {
-                            Ok(()) => {
-                                emit_status(&progress_tx, format!("uploaded nzb to indexer: {url}"))
-                            }
-                            Err(e) => {
-                                emit_status(&progress_tx, format!("indexer upload failed: {e}"))
-                            }
-                        }
-                    }
                 }
 
                 Some(out)

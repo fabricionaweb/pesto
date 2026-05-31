@@ -233,10 +233,6 @@ struct Cli {
     #[arg(long, value_name = "CAT")]
     nzb_category: Option<String>,
 
-    /// Skip the automatic NZB upload to the configured indexer for this run.
-    #[arg(long)]
-    no_upload: bool,
-
     /// `Date:` header for each article: `now` (current time), `random`
     /// (random time within the last 30 days), or a fixed RFC 2822 timestamp.
     /// Omit to let the server supply the date [config: posting.date].
@@ -455,7 +451,6 @@ impl Cli {
                 .nzb_dir
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-            no_upload: self.no_upload,
             history: if self.no_history { Some(false) } else { None },
             notify: if self.no_notify {
                 Some(false)
@@ -837,7 +832,7 @@ async fn run_single_upload(
     // It is the user-dest (hardlink) when set, otherwise the archive copy.
     let mut nzb_reported_path: Option<PathBuf> = nzb_user_dest.clone().or_else(|| out.clone());
 
-    let nzb_xml: Option<String> = if let Some(out) = &out {
+    let _nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
             if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
@@ -929,29 +924,6 @@ async fn run_single_upload(
     } else {
         None
     };
-
-    // Upload to indexer when configured and not suppressed.
-    if let Some(xml) = nzb_xml {
-        if !config.no_upload {
-            if let Some(url) = &config.indexer_url {
-                if let Some(api_key) = &config.indexer_api_key {
-                    let nzb_name = nzb_reported_path
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "upload.nzb".into());
-                    let cat = config
-                        .indexer_category
-                        .as_deref()
-                        .or(config.nzb_category.as_deref());
-                    match pesto::indexer::upload_nzb(url, api_key, cat, &nzb_name, xml).await {
-                        Ok(()) => println!("uploaded nzb to indexer: {url}"),
-                        Err(e) => eprintln!("indexer upload failed: {e}"),
-                    }
-                }
-            }
-        }
-    }
 
     // Send completion notifications.
     let notify_enabled = config.notify.unwrap_or(true)
@@ -1190,27 +1162,6 @@ async fn run_batch(
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"");
                 println!(r#"{{"type":"nzb_written","path":"{path_esc}","season":true}}"#);
-            }
-
-            // Upload consolidated NZB to indexer when configured. Never in
-            // --dry-run / --par2-only: those modes must not touch the network.
-            if !config.no_upload && !config.dry_run && !config.par2_only {
-                if let Some(url) = &config.indexer_url {
-                    if let Some(api_key) = &config.indexer_api_key {
-                        let nzb_name = season_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "season.nzb".into());
-                        let cat = config
-                            .indexer_category
-                            .as_deref()
-                            .or(config.nzb_category.as_deref());
-                        match pesto::indexer::upload_nzb(url, api_key, cat, &nzb_name, xml).await {
-                            Ok(()) => println!("uploaded season nzb to indexer: {url}"),
-                            Err(e) => eprintln!("indexer upload failed (season nzb): {e}"),
-                        }
-                    }
-                }
             }
 
             // Generate season .nfo (mediainfo of first episode) next to the NZB.
