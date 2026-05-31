@@ -1,4 +1,4 @@
-use crate::app::{App, AppState};
+use crate::app::{App, AppState, FileProgress, FileStatus};
 pub mod components;
 pub mod theme;
 
@@ -6,7 +6,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline},
+    widgets::{
+        Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Sparkline,
+    },
     Frame,
 };
 
@@ -1131,13 +1134,44 @@ fn draw_speed_sparkline(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
-    let files = &app.progress.files;
+    // Only the content files belong here; PAR2 recovery volumes have their own
+    // dedicated bar at the top of the Dashboard, so listing each `.par2` volume
+    // as a row just clutters the panel and buries the real files.
+    let files: Vec<&FileProgress> = app
+        .progress
+        .files
+        .iter()
+        .filter(|fp| !fp.name.to_ascii_lowercase().ends_with(".par2"))
+        .collect();
     let n = files.len();
 
-    // Outer block
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Files ({}) ", n));
+    // Each file takes two rows: name line + gauge line.
+    let per_file = 2usize;
+    let rows_available = area.height.saturating_sub(2) as usize; // minus block borders
+    let max_files = (rows_available / per_file).max(1);
+    let shown = n.min(max_files);
+    let overflow = n > shown;
+
+    // Follow the upload: anchor the view on the active file (or, between files,
+    // the last completed one) and keep it centred so completed history scrolls
+    // up while the next files stay visible. Without this the panel is pinned to
+    // index 0 and the work happening further down is never seen.
+    let frontier = files
+        .iter()
+        .rposition(|fp| fp.status == FileStatus::Active)
+        .or_else(|| files.iter().rposition(|fp| fp.status == FileStatus::Done))
+        .unwrap_or(0);
+    let offset = frontier
+        .saturating_sub(shown / 2)
+        .min(n.saturating_sub(shown));
+
+    // Outer block; title shows the visible window when the list overflows.
+    let title = if overflow {
+        format!(" Files ({}-{}/{}) ", offset + 1, offset + shown, n)
+    } else {
+        format!(" Files ({}) ", n)
+    };
+    let outer = Block::default().borders(Borders::ALL).title(title);
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
@@ -1145,11 +1179,16 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Allocate up to 3 lines per file (name + gauge + gap), constrained by height
-    let rows_available = inner.height as usize;
-    let per_file = 2usize; // name line + gauge line
-    let max_files = (rows_available / per_file).max(1);
-    let shown = n.min(max_files);
+    // Reserve a one-column gutter on the right for the scrollbar when needed.
+    let (list_area, scrollbar_area) = if overflow {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        (cols[0], Some(cols[1]))
+    } else {
+        (inner, None)
+    };
 
     // Build constraints: alternating name (1) + gauge (1) rows
     let constraints: Vec<Constraint> = (0..shown)
@@ -1159,9 +1198,9 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(inner);
+        .split(list_area);
 
-    for (i, fp) in files.iter().take(shown).enumerate() {
+    for (i, fp) in files.iter().skip(offset).take(shown).enumerate() {
         let pct = if fp.total_segments > 0 {
             (fp.done_segments as f64 / fp.total_segments as f64 * 100.0).min(100.0) as u16
         } else {
@@ -1205,9 +1244,15 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(gauge, gauge_row);
     }
 
-    // If we couldn't show all files, show a summary line
-    if shown < n {
-        // There's no room; the outer block title already shows the count
+    // Scrollbar showing where the visible window sits within the full list.
+    if let Some(sb_area) = scrollbar_area {
+        let mut sb_state = ScrollbarState::new(n)
+            .viewport_content_length(shown)
+            .position(offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        f.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
     }
 }
 
