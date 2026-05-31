@@ -229,10 +229,43 @@ fn archive_nzb(
         .take(80)
         .collect();
     let dest = dir.join(format!("{stamp}_{safe}.nzb"));
+
+    // Guard against archiving a file onto itself. `src` is already a hard link
+    // of the canonical archive copy (`~/.config/pesto/nzb/<ts>_<stem>.nzb`),
+    // and truncating `name` to 80 chars can strip the extension so that
+    // `<stamp>_<safe>.nzb` resolves to that very same canonical path. When that
+    // happens `hard_link` fails with EEXIST and the `fs::copy` fallback would
+    // open `dest` with `O_TRUNC` *before* reading `src` — and since both names
+    // point at one inode, that zeroes the NZB. The file is already archived in
+    // this case, so just report the existing path.
+    if same_file(src, &dest) {
+        return Some(dest);
+    }
+
     fs::hard_link(src, &dest)
         .or_else(|_| fs::copy(src, &dest).map(|_| ()))
         .ok()?;
     Some(dest)
+}
+
+/// Whether two paths refer to the same on-disk file (same device + inode).
+/// Returns `false` if either path cannot be stat'd.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (fs::canonicalize(a), fs::canonicalize(b)) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
+    }
 }
 
 /// Escape a string for embedding inside a JSON string literal.
@@ -339,5 +372,54 @@ mod tests {
     #[test]
     fn json_opt_escapes_quotes() {
         assert_eq!(json_opt(Some(r#"say "hi""#)), r#""say \"hi\"""#);
+    }
+
+    // Regression: archiving an NZB whose computed destination resolves to the
+    // same inode as the source must not zero the file. This reproduces the
+    // `--season` data-loss bug where a long release name truncated to 80 chars
+    // dropped its extension, making `<stamp>_<safe>.nzb` collide with the
+    // canonical archive copy that `src` is already hard-linked to.
+    #[test]
+    fn archive_nzb_does_not_zero_a_self_referential_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let nzb_dir = root.join("nzb");
+        fs::create_dir_all(&nzb_dir).unwrap();
+
+        let stamp = "20260101T000000Z";
+        let name = "Movie";
+
+        // The canonical archive copy that already lives in <root>/nzb, named
+        // exactly as archive_nzb would name its destination.
+        let dest = nzb_dir.join(format!("{stamp}_{name}.nzb"));
+        fs::write(&dest, b"<nzb>real content</nzb>").unwrap();
+
+        // `src` is a separate path hard-linked to the canonical copy — i.e. the
+        // user-destination NZB. Same inode as `dest`.
+        let src = root.join("user-dest.nzb");
+        fs::hard_link(&dest, &src).unwrap();
+
+        let archived = archive_nzb(&src, stamp, name, Some(root));
+
+        assert_eq!(archived.as_deref(), Some(dest.as_path()));
+        // Neither the source nor the destination may have been truncated.
+        assert_eq!(fs::read(&src).unwrap(), b"<nzb>real content</nzb>");
+        assert_eq!(fs::read(&dest).unwrap(), b"<nzb>real content</nzb>");
+    }
+
+    // A normal archive (no collision) still hard-links the NZB into <dir>/nzb.
+    #[test]
+    fn archive_nzb_links_a_distinct_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let src = root.join("upload.nzb");
+        fs::write(&src, b"payload").unwrap();
+
+        let dest = archive_nzb(&src, "20260101T000000Z", "Movie", Some(root)).unwrap();
+        assert!(dest.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"payload");
+        // Original is untouched.
+        assert_eq!(fs::read(&src).unwrap(), b"payload");
     }
 }
