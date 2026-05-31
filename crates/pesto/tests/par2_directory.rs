@@ -75,8 +75,6 @@ async fn par2_only_directory_repair_recreates_tree() {
         nzb_category: None,
         indexer_url: None,
         indexer_api_key: None,
-        indexer_category: None,
-        no_upload: false,
         notify_webhook: None,
         notify_ntfy: None,
         notify: None,

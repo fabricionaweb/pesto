@@ -43,8 +43,6 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         nzb_category: None,
         indexer_url: None,
         indexer_api_key: None,
-        indexer_category: None,
-        no_upload: false,
         notify_webhook: None,
         notify_ntfy: None,
         notify: None,
