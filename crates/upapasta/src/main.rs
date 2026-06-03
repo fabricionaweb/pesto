@@ -1081,7 +1081,7 @@ fn trigger_prowlarr_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     .unwrap_or_default();
                 prowlarr::search_by_release(&cfg, &client, &release_name, &ids)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("{:#}", e))
             }
             Err(e) => Err(e.to_string()),
         };
@@ -1416,10 +1416,22 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 }
             };
 
+            // For Season mode, force resume=true so a .pesto-state file is
+            // written per episode. This lets a retry pass skip already-posted
+            // segments and re-send only the parts that the server rejected.
+            let episode_config = if folder_mode == app::FolderMode::Season {
+                let mut c = config.clone();
+                c.resume = true;
+                c
+            } else {
+                config.clone()
+            };
+
             let mut all_segments = Vec::new();
             let mut total_size = 0u64;
             let mut folder_ok = true;
-            for inf in &files {
+            let mut failed_indices: Vec<usize> = Vec::new();
+            for (ep_idx, inf) in files.iter().enumerate() {
                 let ep_name = inf
                     .path
                     .file_name()
@@ -1427,7 +1439,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     .unwrap_or_else(|| inf.name.clone());
                 let ep_start = Instant::now();
                 let result = run_real_upload(
-                    config.clone(),
+                    episode_config.clone(),
                     vec![inf.path.clone()],
                     ep_name.clone(),
                     nzb_out_dir.clone(),
@@ -1440,6 +1452,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     Err(ref e) => {
                         let _ = tx.send(AppEvent::UploadError(e.to_string()));
                         folder_ok = false;
+                        failed_indices.push(ep_idx);
                     }
                     Ok(ref o) if o.cancelled => {
                         any_cancelled = true;
@@ -1448,16 +1461,84 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     Ok(o) => {
                         if o.had_failures {
                             folder_ok = false;
+                            // Don't accumulate partial segments here; the retry
+                            // pass will contribute the complete set once the
+                            // missing parts are re-posted via resume state.
+                            failed_indices.push(ep_idx);
+                        } else {
+                            total_size += o.total_bytes;
+                            let _ = tx.send(AppEvent::CatalogRecord {
+                                original_name: ep_name,
+                                size_bytes: o.total_bytes,
+                                nzb_path: o.nzb_path,
+                                duration_s: ep_dur,
+                            });
+                            all_segments.extend(o.segments);
                         }
-                        total_size += o.total_bytes;
-                        let _ = tx.send(AppEvent::CatalogRecord {
-                            original_name: ep_name,
-                            size_bytes: o.total_bytes,
-                            nzb_path: o.nzb_path,
-                            duration_s: ep_dur,
-                        });
-                        all_segments.extend(o.segments);
                     }
+                }
+            }
+
+            // Season retry pass: re-upload only the episodes that had segment
+            // failures. Resume state written during the first pass lets the
+            // poster skip segments that already landed on the server, so only
+            // the truly missing parts are re-sent. If every failed episode
+            // recovers, folder_ok is restored and the season NZB is generated
+            // as normal; if any episode still fails, folder_ok stays false and
+            // the incomplete pack is not forwarded to the indexer.
+            if folder_mode == app::FolderMode::Season
+                && !failed_indices.is_empty()
+                && !any_cancelled
+            {
+                let _ = tx.send(AppEvent::Progress(format!(
+                    "retrying {} failed episode(s)...",
+                    failed_indices.len()
+                )));
+                let mut all_retried = true;
+                for ep_idx in &failed_indices {
+                    let inf = &files[*ep_idx];
+                    let ep_name = inf
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| inf.name.clone());
+                    let ep_start = Instant::now();
+                    let result = run_real_upload(
+                        episode_config.clone(),
+                        vec![inf.path.clone()],
+                        ep_name.clone(),
+                        nzb_out_dir.clone(),
+                        tx.clone(),
+                        cancel_token.clone(),
+                    )
+                    .await;
+                    let ep_dur = ep_start.elapsed().as_secs_f64();
+                    match result {
+                        Ok(ref o) if o.cancelled => {
+                            any_cancelled = true;
+                            break 'outer;
+                        }
+                        Ok(o) if !o.had_failures => {
+                            total_size += o.total_bytes;
+                            let _ = tx.send(AppEvent::CatalogRecord {
+                                original_name: ep_name,
+                                size_bytes: o.total_bytes,
+                                nzb_path: o.nzb_path,
+                                duration_s: ep_dur,
+                            });
+                            all_segments.extend(o.segments);
+                        }
+                        Err(ref e) => {
+                            let _ = tx.send(AppEvent::UploadError(format!("retry failed: {e}")));
+                            all_retried = false;
+                        }
+                        Ok(_) => {
+                            all_retried = false;
+                        }
+                    }
+                }
+                if all_retried {
+                    folder_ok = true;
                 }
             }
 

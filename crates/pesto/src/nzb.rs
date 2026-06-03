@@ -144,6 +144,155 @@ fn write_file(
     out.push_str("  </file>\n");
 }
 
+// ── NZB parser ──────────────────────────────────────────────────────────────
+
+/// The contents of a parsed `.nzb` file.
+pub struct ParsedNzb {
+    /// `From` header found in the first `<file>` element.
+    pub poster: String,
+    /// Newsgroups listed in `<groups>` (deduplicated, first file wins).
+    pub groups: Vec<String>,
+    /// All segments, sorted by `(file_name, part)`.
+    pub segments: Vec<PostedSegment>,
+    /// `<head>` metadata (`name`, `password`, `category`).
+    pub meta: NzbMeta,
+}
+
+/// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
+///
+/// The parser targets the format produced by [`generate`] but tolerates minor
+/// whitespace variation.  Attributes must use double quotes. Segments are
+/// sorted by `(file_name, part)` before returning so they can be passed
+/// directly to [`generate`].
+pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
+    use anyhow::Context as _;
+
+    let mut poster = String::new();
+    let mut groups: Vec<String> = Vec::new();
+    let mut meta = NzbMeta::default();
+    let mut segments: Vec<PostedSegment> = Vec::new();
+
+    let mut current_file_name = String::new();
+    let mut current_subject_name = String::new();
+    let mut file_segment_start: usize = 0;
+    let mut in_groups = false;
+    let mut in_file = false;
+
+    for line in content.lines() {
+        let t = line.trim();
+
+        if t.starts_with("<file ") {
+            in_file = true;
+            in_groups = false;
+            current_file_name = xml_attr(t, "name").context("<file> missing name attribute")?;
+            if poster.is_empty() {
+                poster = xml_attr(t, "poster").unwrap_or_default();
+            }
+            let subject = xml_attr(t, "subject").unwrap_or_default();
+            current_subject_name = strip_part_suffix(&subject);
+            file_segment_start = segments.len();
+        } else if t == "</file>" {
+            // Back-fill `total` now that we know how many segments this file has.
+            let total = (segments.len() - file_segment_start) as u32;
+            for seg in &mut segments[file_segment_start..] {
+                seg.total = total;
+            }
+            in_file = false;
+        } else if t == "<groups>" {
+            in_groups = true;
+        } else if t == "</groups>" {
+            in_groups = false;
+        } else if in_groups {
+            if let Some(g) = xml_text(t, "group") {
+                if !groups.contains(&g) {
+                    groups.push(g);
+                }
+            }
+        } else if in_file && t.starts_with("<segment ") {
+            let bytes: u64 = xml_attr(t, "bytes")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let part: u32 = xml_attr(t, "number")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let raw_id = xml_text(t, "segment").unwrap_or_default();
+            let message_id = if raw_id.starts_with('<') {
+                raw_id
+            } else {
+                format!("<{raw_id}>")
+            };
+            segments.push(PostedSegment {
+                file_name: current_file_name.clone(),
+                subject_name: current_subject_name.clone(),
+                file_size: 0,
+                part,
+                total: 0, // fixed up when </file> is seen
+                message_id,
+                bytes,
+            });
+        } else if t.starts_with("<meta ") {
+            let kind = xml_attr(t, "type").unwrap_or_default();
+            let value = xml_text(t, "meta").unwrap_or_default();
+            match kind.as_str() {
+                "name" => meta.name = Some(value),
+                "password" => meta.password = Some(value),
+                "category" => meta.category = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
+
+    Ok(ParsedNzb {
+        poster,
+        groups,
+        segments,
+        meta,
+    })
+}
+
+/// Extract the value of `name="..."` from an XML tag string.
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = tag.find(&key)? + key.len();
+    let end = tag[start..].find('"')? + start;
+    Some(xml_unescape(&tag[start..end]))
+}
+
+/// Extract text content from `<tag ...>text</tag>` on a single line.
+fn xml_text(line: &str, tag: &str) -> Option<String> {
+    let open_end = line.find('>')?;
+    let close = format!("</{tag}>");
+    let close_start = line.rfind(&close)?;
+    if close_start < open_end + 1 {
+        return None;
+    }
+    Some(xml_unescape(&line[open_end + 1..close_start]))
+}
+
+/// Strip the ` (N/M)` part-indicator suffix from a subject line.
+fn strip_part_suffix(subject: &str) -> String {
+    if let Some(pos) = subject.rfind(" (") {
+        let tail = &subject[pos..];
+        if tail.contains('/') && tail.ends_with(')') {
+            return subject[..pos].to_string();
+        }
+    }
+    subject.to_string()
+}
+
+/// Reverse the XML entity escaping applied by [`escape`].
+fn xml_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+// ── XML escaping ─────────────────────────────────────────────────────────────
+
 /// Escape the five XML predefined entities.
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -432,5 +581,62 @@ mod tests {
         assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
         assert!(!xml.contains("type=\"name\""));
         assert!(!xml.contains("type=\"category\""));
+    }
+
+    // ── parse() round-trip tests ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_round_trips_generate() {
+        let groups = vec!["alt.binaries.test".into()];
+        let segs = vec![
+            seg("ep01.mkv", 1, 3, "<a1@x>"),
+            seg("ep01.mkv", 2, 3, "<a2@x>"),
+            seg("ep01.mkv", 3, 3, "<a3@x>"),
+        ];
+        let meta = NzbMeta {
+            name: Some("Test Show S01".into()),
+            password: None,
+            category: Some("TV".into()),
+        };
+        let xml = generate("poster <p@x>", &groups, &segs, &meta, false);
+        let parsed = parse(&xml).expect("parse must succeed");
+
+        assert_eq!(parsed.poster, "poster <p@x>");
+        assert_eq!(parsed.groups, vec!["alt.binaries.test"]);
+        assert_eq!(parsed.meta.name.as_deref(), Some("Test Show S01"));
+        assert_eq!(parsed.meta.category.as_deref(), Some("TV"));
+        assert_eq!(parsed.segments.len(), 3);
+        assert_eq!(parsed.segments[0].file_name, "ep01.mkv");
+        assert_eq!(parsed.segments[0].part, 1);
+        assert_eq!(parsed.segments[0].total, 3);
+        assert!(parsed.segments[0].message_id.starts_with('<'));
+    }
+
+    #[test]
+    fn parse_multi_file_nzb_preserves_all_segments() {
+        let groups = vec!["alt.binaries.test".into()];
+        let segs = vec![
+            seg("ep01.mkv", 1, 2, "<e1p1@x>"),
+            seg("ep01.mkv", 2, 2, "<e1p2@x>"),
+            seg("ep02.mkv", 1, 1, "<e2p1@x>"),
+        ];
+        let xml = generate("p <p@x>", &groups, &segs, &no_meta(), false);
+        let parsed = parse(&xml).expect("parse must succeed");
+
+        assert_eq!(parsed.segments.len(), 3);
+        // After sort: ep01 parts then ep02.
+        assert_eq!(parsed.segments[0].file_name, "ep01.mkv");
+        assert_eq!(parsed.segments[2].file_name, "ep02.mkv");
+        assert_eq!(parsed.segments[0].total, 2);
+        assert_eq!(parsed.segments[2].total, 1);
+    }
+
+    #[test]
+    fn parse_strips_angle_brackets_and_re_adds_them() {
+        let segs = vec![seg("f.bin", 1, 1, "<msgid@host>")];
+        let xml = generate("p <p@x>", &["alt.test".into()], &segs, &no_meta(), false);
+        let parsed = parse(&xml).expect("parse must succeed");
+        // message_id must carry angle brackets.
+        assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
     }
 }
