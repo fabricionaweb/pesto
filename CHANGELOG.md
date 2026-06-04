@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.12] — 2026-06-03
+
 ### Added
 - **`pesto --merge-season <dir>`** — offline command that reads all `.nzb` files
   in a directory, groups them by season identifier (`S01`, `S02`, …) and writes
