@@ -166,13 +166,21 @@ fn compress_with_rar(
 }
 
 pub fn find_binary(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .as_deref()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .split(':')
-        .map(|dir| PathBuf::from(dir).join(name))
-        .find(|p| p.is_file())
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let bare = dir.join(name);
+        if bare.is_file() {
+            return Some(bare);
+        }
+        #[cfg(windows)]
+        for ext in ["exe", "cmd", "bat"] {
+            let with_ext = dir.join(format!("{name}.{ext}"));
+            if with_ext.is_file() {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
 }
 
 fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
