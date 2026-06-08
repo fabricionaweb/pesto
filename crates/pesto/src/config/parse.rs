@@ -220,12 +220,12 @@ impl Config {
                 .unwrap_or_default(),
             quiet: file.output.quiet.unwrap_or(false),
             bell: file.output.bell.unwrap_or(false),
-            check: cli
-                .check
-                .unwrap_or_else(|| file.posting.check.unwrap_or(false)),
             check_delay_secs: cli
                 .check_delay_secs
                 .unwrap_or_else(|| file.posting.check_delay.unwrap_or(30)),
+            check: cli.check
+                .unwrap_or_else(|| file.posting.check.unwrap_or(false))
+                || cli.check_delay_secs.is_some(),
             check_retries: cli
                 .check_retries
                 .unwrap_or_else(|| file.posting.check_retries.unwrap_or(2)),
