@@ -442,8 +442,10 @@ pesto --verify movie.mkv
 #### Post-upload check (`--check` / `--check-delay`)
 
 After the entire upload is complete, waits a configurable number of seconds
-for the server to propagate the articles, then runs a `STAT` pass over every
-article. Any article not found is reported as missing.
+for the server to propagate the articles, then runs a parallel `STAT` pass
+over every article using the same number of connections as the upload.
+Any article not found is automatically reposted with its original `Message-ID`
+so the `.nzb` remains valid, followed by a second STAT pass to confirm.
 
 Passing `--check-delay` alone is enough to activate the check — `--check` is
 implied automatically.
@@ -457,22 +459,30 @@ pesto --check-delay 60 movie.mkv
 
 # Explicit: wait 120 s, up to 5 STAT attempts per article (20 s apart)
 pesto --check --check-delay 120 --check-retries 5 movie.mkv
+
+# Limit check to 8 parallel connections regardless of upload connections
+pesto --check --check-connections 8 movie.mkv
 ```
 
-When an article is not found on the first attempt, pesto retries up to
-`--check-retries` times (default **3**) with **20 seconds** between each
-attempt. The terminal shows a live notice during each wait:
+The terminal shows a live countdown during the propagation wait, then a
+progress bar during the STAT pass — green on success, red on missing articles:
 
 ```
-▸ check [████      ] 4281/4281 · 1 missing
-  ⏳ article not found — retry 1/3 in 20s
+▸ check  waiting for propagation · 28s remaining
+
+▸ check  [██████████████████████████] 4281/4281 · all verified · elapsed 0:08
 ```
+
+When an article is not found, pesto retries up to `--check-retries` times
+(default **3**) with **20 seconds** between each attempt, then reposts it
+automatically if still missing.
 
 | Flag | Config key | Default | Description |
 |------|-----------|---------|-------------|
 | `--check` | `posting.check` | off | Run a STAT pass after upload |
 | `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass (implies `--check`) |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for the STAT pass |
 
 ### Rate limiting
 
@@ -645,6 +655,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--check` | `posting.check` | off | Run a STAT pass over all articles after the upload completes |
 | `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass; implies `--check` |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during the check pass; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for the STAT pass |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
