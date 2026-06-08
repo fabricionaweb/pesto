@@ -362,8 +362,9 @@ struct Cli {
     #[arg(long, value_name = "N")]
     check_retries: Option<u32>,
 
-    /// Number of parallel NNTP connections for the post-check STAT pass
-    /// [config: posting.check_connections, default 8].
+    /// Number of parallel NNTP connections for the post-check STAT pass;
+    /// defaults to the same value as the upload connection count
+    /// [config: posting.check_connections].
     #[arg(long, value_name = "N")]
     check_connections: Option<usize>,
 

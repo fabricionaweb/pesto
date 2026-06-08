@@ -1813,9 +1813,14 @@ pub async fn check_articles(
     }
 
     // Distribute segments across N parallel workers, each holding its own
-    // NNTP connection. Results (missing IDs and per-article ok/fail) are
-    // collected via shared atomics and a mutex-protected list.
-    let n_workers = config.check_connections.max(1).min(segments.len());
+    // NNTP connection. 0 = match the upload connection count.
+    let n_workers = if config.check_connections == 0 {
+        config.total_connections()
+    } else {
+        config.check_connections
+    }
+    .max(1)
+    .min(segments.len());
     let max_attempts = config.check_retries.max(1) as usize;
 
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
