@@ -232,7 +232,7 @@ impl Config {
                 .unwrap_or_else(|| file.posting.check_retries.unwrap_or(3)),
             check_connections: cli
                 .check_connections
-                .unwrap_or_else(|| file.posting.check_connections.unwrap_or(8)),
+                .unwrap_or_else(|| file.posting.check_connections.unwrap_or(0)),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth
