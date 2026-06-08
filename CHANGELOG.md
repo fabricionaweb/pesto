@@ -7,6 +7,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.17] — 2026-06-08
+
+### Added
+- **Parallel STAT pass**: the post-upload check now runs N parallel NNTP
+  connections instead of a single sequential one. By default the number of
+  connections matches the upload connection count (`posting.connections`),
+  giving a proportional speedup — 50 connections → ~50× faster check.
+  Override with `--check-connections <N>` or `posting.check_connections` in
+  `config.toml`.
+- **Check progress bar with countdown**: the terminal now shows a live panel
+  during the check delay (`waiting for propagation · 28s remaining`) and a
+  progress bar during the STAT pass, coloured green on success and red on
+  missing articles.
+
+### Fixed
+- **Panic in parallel check workers**: `worker_idx` was passed directly as a
+  server index, causing an out-of-bounds panic when the number of workers
+  exceeded the number of configured servers (the common single-server case).
+  Fixed by taking `worker_idx % servers.len()`.
+- **Check panel invisible after upload**: the check renderer is a fresh
+  `RenderState` with no upload events, leaving `started = false` and causing
+  `draw_panel` to return immediately. `CheckStarted` and `CheckWaiting` now
+  set `started = true` so the panel renders correctly.
+- **`--check-delay` without `--check` was silently ignored**: passing
+  `--check-delay <N>` alone now activates the STAT pass automatically.
+- **Repost errors now visible in terminal**: per-attempt repost failures are
+  emitted as `Status` events so the reason for a failed repost appears in the
+  panel instead of only in the debug log.
+
+### Changed
+- **Post-upload check retry interval**: increased from 5 s to 20 s between
+  each STAT retry.
+- **Default `check_retries`**: raised from 2 to 3.
+- **Automatic repost of missing articles**: when `--check` finds articles not
+  confirmed by the server, pesto re-reads each missing segment from the
+  original file, re-encodes it as yEnc, and reposts it with the same
+  `Message-ID` so the existing `.nzb` remains valid. A second STAT pass
+  confirms the reposts landed.
+
+### Docs
+- Added a dedicated **Post-upload check** subsection under *Reliability*
+  documenting both verification modes (`--verify` vs `--check`/`--check-delay`),
+  retry mechanics, parallel connections, and terminal output.
+- Added `--check`, `--check-delay`, `--check-retries`, and
+  `--check-connections` to the flags table.
+
 ## [0.3.16] — 2026-06-08
 
 ### Added
