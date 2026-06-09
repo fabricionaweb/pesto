@@ -224,22 +224,19 @@ pesto \
 `--obfuscate` controls what appears on the wire. Nothing prevents Usenet indexers
 from cataloguing plain posts; obfuscation hides the content from them.
 
-| Mode | Subject header | yEnc `name=` field | Real path in `.nzb` |
-|------|---------------|---------------------|----------------------|
-| `none` (default) | real name | real name | yes |
-| `subject` | random UUID | real name | yes |
-| `full` | random UUID | random UUID | yes |
+| Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
+|------|---------|--------------|---------------|----------------------|
+| `none` (default) | real name | real name | config value | yes |
+| `full` | random, 10–30 chars | random, 10–30 chars | random per file | yes |
 
-`full` hides everything on the wire. The real file names are only in the `.nzb`
-you keep, or recoverable through the PAR2 set.
+`full` randomises everything on the wire using variable-length alphanumeric
+strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
+random TLD. The real file names are only in the `.nzb` you keep, or recoverable
+through the PAR2 set.
 
 A bare `--obfuscate` (no value) means `full`.
 
 ```bash
-# Hide the subject only — indexers cannot catalogue it; download clients still
-# see the real file name from the yEnc header
-pesto --obfuscate=subject movie.mkv
-
 # Full obfuscation — nothing on the wire reveals the content
 pesto --obfuscate movie.mkv
 # same as:
@@ -248,6 +245,20 @@ pesto --obfuscate=full movie.mkv
 # Combine with compression for maximum privacy
 pesto --obfuscate --password movie.mkv
 ```
+
+### Paranoid mode (experimental)
+
+`--obfuscate=paranoid` goes one step further: every individual article gets its
+own unique subject and `From` header, making it impossible to group segments by
+wire metadata alone. The NZB is required to download.
+
+```bash
+pesto --obfuscate=paranoid movie.mkv
+```
+
+> **Note:** `paranoid` is not listed in `--help` and is considered experimental.
+> Use it only if you understand the implications — the NZB file is the only way
+> to reassemble the download.
 
 ---
 
@@ -642,7 +653,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `subject`, or `full`; bare flag = `full` |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none` or `full`; bare flag = `full` |
 | `--date <VALUE>` | `posting.date` | server-supplied | `now`, `random`, or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
