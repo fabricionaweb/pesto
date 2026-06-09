@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.20] — 2026-06-09
+
+### Fixed
+- **NZB now reflects actual poster and date from the wire**: generated `.nzb`
+  files previously always used `config.from` and `SystemTime::now()` regardless
+  of what was sent on the wire. In full/paranoid obfuscation mode this produced
+  incorrect metadata. `PostedSegment` now carries the `date` timestamp used for
+  each article; `nzb::generate` reads it back instead of inventing a fresh
+  value. The `poster` field is also taken from the segment's `from` so rotating
+  identities in paranoid mode are correctly reflected per `<file>` element.
+- **NZB parse preserves poster/date per segment**: `nzb::parse` now populates
+  `PostedSegment.from` and `PostedSegment.date` so the parse → generate → parse
+  round-trip used by `--merge-season` produces correct output.
+
 ## [0.3.19] — 2026-06-09
 
 ### Added
