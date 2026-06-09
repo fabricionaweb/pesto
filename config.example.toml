@@ -93,10 +93,11 @@ groups = ["alt.binaries.test"]
 # upload_rate = "0"
 
 # date — value for the `Date:` header on each article. Options:
-#   "now"    current UTC time at the moment of posting (default)
-#   "random" a random time within the last 30 days
+#   "now"    current UTC time at the moment of posting
+#   "random" a random time within the last 24 hours (default when obfuscate is set)
 #   A fixed RFC 2822 timestamp: "Mon, 01 Jan 2024 12:00:00 +0000"
-# When omitted, pesto does not set the Date header and lets the server supply it.
+# When omitted without obfuscation, pesto does not set the Date header and lets
+# the server supply it. When obfuscate is set, "random" is used automatically.
 # date = "random"
 
 # no_archive — add `X-No-Archive: yes` to every posted article. Default: false.

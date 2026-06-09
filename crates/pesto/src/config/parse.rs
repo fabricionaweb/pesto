@@ -208,7 +208,15 @@ impl Config {
             notify_webhook: file.notify.webhook_url,
             notify_ntfy: file.notify.ntfy_topic,
             notify: cli.notify,
-            date: cli.date.or(file.posting.date),
+            date: {
+                let explicit = cli.date.or(file.posting.date);
+                let obfuscate = cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
+                if explicit.is_none() && obfuscate != ObfuscateMode::None {
+                    Some("random".to_string())
+                } else {
+                    explicit
+                }
+            },
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
             post_hook: cli.post_hook.or(file.output.post_hook),
