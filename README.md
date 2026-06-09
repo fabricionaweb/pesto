@@ -234,6 +234,13 @@ strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
 random TLD. The real file names are only in the `.nzb` you keep, or recoverable
 through the PAR2 set.
 
+When obfuscation is active, pesto also randomises the `Date:` header of each
+article to a time within the last 24 hours. This prevents articles in the same
+batch from sharing an identical timestamp, which would make them trivially
+groupable even when every other field is randomised. The 24-hour window is safe
+for all known NNTP servers. You can override this with `--date now` or an
+explicit timestamp if needed.
+
 A bare `--obfuscate` (no value) means `full`.
 
 ```bash
@@ -654,7 +661,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
 | `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none` or `full`; bare flag = `full` |
-| `--date <VALUE>` | `posting.date` | server-supplied | `now`, `random`, or an RFC 2822 timestamp |
+| `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random` (last 24 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
 | **Reliability** | | | |
