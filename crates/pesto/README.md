@@ -632,11 +632,24 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--date <VALUE>` | `posting.date` | server-supplied | `now`, `random`, or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
+| `--pipeline-depth <N>` | `posting.pipeline_depth` | `0` | Articles to pipeline per connection (`0` = adaptive) |
+| `--stdin-name <NAME>` | — | — | Filename for stdin (`-`) input |
 | **Reliability** | | | |
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
 | `--dry-run` | — | off | Encode only; never touch the network |
+| `--resume` | `output.resume` | off | Resume interrupted upload from `.pesto-state` file |
+| `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
+| `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
+| `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
+| `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
+| `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
+| `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
 | `--verify` | `posting.verify` | off | Confirm each article with STAT |
+| `--check` | `posting.check` | off | Run a STAT pass over all articles after upload |
+| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before STAT pass; implies `--check` |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during check pass |
+| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for STAT pass |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
@@ -647,6 +660,10 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="name">` in the `.nzb` |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
+| `--nzb-conflict <MODE>` | `output.nzb_conflict` | overwrite | `overwrite`, `rename`, or `fail` on existing NZB |
+| `--no-overwrite` | — | — | Alias for `--nzb-conflict=rename` |
+| `-v`, `--verbose` | — | off | Increase log verbosity (`-v`=INFO, `-vv`=DEBUG, `-vvv`=TRACE) |
+| `--log-file <FILE>` | — | — | Redirect verbose logs to file (requires `-v`) |
 | `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
 | `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |
 | `--history` / `--no-history` | `output.history` | on | Write a record to the upload history log |

@@ -380,7 +380,7 @@ struct Cli {
 
     /// Redirect verbose log output to FILE instead of stderr. The terminal
     /// progress panel is kept active when this flag is set. Has no effect
-    /// without -v [config: output.log_file].
+    /// without -v.
     #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
 
