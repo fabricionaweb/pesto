@@ -77,7 +77,7 @@ pub async fn run_upload(
             })
             .unwrap_or_else(|| "archive".to_string());
 
-        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+        let archive_stem = if config.obfuscate != ObfuscateMode::None {
             crate::article::obfuscated_name()
         } else {
             archive_stem
