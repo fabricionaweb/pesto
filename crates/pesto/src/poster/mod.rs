@@ -123,11 +123,25 @@ pub struct PostedSegment {
     pub from: String,
 }
 
+/// A segment that failed to post during the upload run. Carries enough
+/// information to attempt a fresh post (new Message-ID).
+#[derive(Debug, Clone)]
+pub struct FailedTask {
+    pub file_name: String,
+    pub subject_name: String,
+    pub file_size: u64,
+    pub part: u32,
+    pub total: u32,
+    pub from: String,
+}
+
 /// The result of a posting run.
 #[derive(Debug)]
 pub struct PostOutcome {
     pub segments: Vec<PostedSegment>,
     pub failures: Vec<String>,
+    /// Segments that failed during the upload run, preserved for retry.
+    pub failed_tasks: Vec<FailedTask>,
     pub cancelled: bool,
     /// The newsgroup(s) actually used for this upload (one entry when multiple
     /// groups are configured, since `pick_post_group` selects one at random).
@@ -168,6 +182,7 @@ struct Shared {
 
     results: Mutex<Vec<PostedSegment>>,
     failures: Mutex<Vec<String>>,
+    failed_tasks: Mutex<Vec<FailedTask>>,
     /// Progress channel; `None` keeps the poster silent (library default).
     events: Option<ProgressSender>,
     cancelled: AtomicBool,
@@ -361,6 +376,7 @@ pub async fn post_files_with_progress_and_cancel(
 
         results: Mutex::new(Vec::new()),
         failures: Mutex::new(Vec::new()),
+        failed_tasks: Mutex::new(Vec::new()),
         events,
         cancelled: AtomicBool::new(false),
         resume: resume_arc,
@@ -475,6 +491,7 @@ pub async fn post_files_with_progress_and_cancel(
     let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
     let failures = std::mem::take(&mut *shared.failures.lock().unwrap());
+    let failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
     let cancelled = shared.cancelled.load(Ordering::Relaxed);
 
     // 26d/26g — network performance summary + post phase timing
@@ -491,6 +508,7 @@ pub async fn post_files_with_progress_and_cancel(
     Ok(PostOutcome {
         segments,
         failures,
+        failed_tasks,
         cancelled,
         groups: shared.post_group.clone(),
     })
@@ -1691,6 +1709,14 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
         description: description.clone(),
     });
     shared.failures.lock().unwrap().push(description);
+    shared.failed_tasks.lock().unwrap().push(FailedTask {
+        file_name: meta.real_name.clone(),
+        subject_name: task.subject_name.clone(),
+        file_size: meta.size,
+        part: task.part,
+        total: task.total,
+        from: task.from.clone(),
+    });
 }
 
 /// Re-post a subset of already-posted segments whose `Message-ID`s are listed
@@ -1842,6 +1868,141 @@ pub async fn repost_missing_segments(
     }
 
     Ok(reposted)
+}
+
+/// Post a fresh copy of each segment in `failed`, generating a new
+/// `Message-ID` for each one. Returns the `PostedSegment`s that were
+/// successfully posted; tasks that exhaust all retries are silently dropped
+/// (the caller can compare lengths to detect persistent failures).
+pub async fn repost_failed_tasks(
+    config: &Config,
+    failed: &[FailedTask],
+    groups: &[String],
+    events: Option<&ProgressSender>,
+) -> Result<Vec<PostedSegment>> {
+    if failed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let server = config
+        .all_servers()
+        .next()
+        .expect("at least one server is configured");
+    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+
+    let article_size = config.article_size as u64;
+    let max_retries = config.retries.max(1);
+    let mut recovered: Vec<PostedSegment> = Vec::new();
+
+    for (i, task) in failed.iter().enumerate() {
+        let offset = (task.part as u64 - 1) * article_size;
+        let read_len = (task.file_size - offset).min(article_size) as usize;
+
+        let path = PathBuf::from(&task.file_name);
+        let mut file = match File::open(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(file = %task.file_name, "retry: cannot open file: {e}");
+                continue;
+            }
+        };
+
+        use tokio::io::AsyncSeekExt;
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+            warn!(file = %task.file_name, offset, "retry: seek failed: {e}");
+            continue;
+        }
+
+        let mut buf = vec![0u8; read_len];
+        if let Err(e) = file.read_exact(&mut buf).await {
+            warn!(file = %task.file_name, "retry: read failed: {e}");
+            continue;
+        }
+
+        let spec = yenc::PartSpec {
+            number: task.part,
+            total: task.total,
+            offset,
+        };
+        let encoded = yenc::encode_part(
+            &task.subject_name,
+            task.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            None,
+        );
+        let message_id = generate_message_id(config.message_id_domain.as_deref());
+        let article = Article {
+            message_id: message_id.clone(),
+            from: task.from.clone(),
+            newsgroups: groups.to_vec(),
+            subject: default_subject(&task.subject_name, task.part, task.total),
+            date: resolve_date(config.date.as_deref()),
+            no_archive: config.no_archive,
+        };
+        let headers = article.build_headers();
+        let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+
+        let mut ok = false;
+        for attempt in 1..=max_retries {
+            match slot.ensure_connected().await {
+                Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
+                    Ok(()) => {
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        slot.invalidate();
+                        warn!(file = %task.file_name, part = task.part, attempt, "retry attempt failed: {e}");
+                        if attempt < max_retries {
+                            tokio::time::sleep(Duration::from_secs(config.retry_delay)).await;
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!(attempt, "retry: connect failed: {e}");
+                    if attempt < max_retries {
+                        tokio::time::sleep(Duration::from_secs(config.retry_delay)).await;
+                    }
+                }
+            }
+        }
+
+        if ok {
+            recovered.push(PostedSegment {
+                file_name: task.file_name.clone(),
+                subject_name: task.subject_name.clone(),
+                file_size: task.file_size,
+                part: task.part,
+                total: task.total,
+                message_id,
+                bytes: wire_bytes,
+                from: task.from.clone(),
+            });
+            if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::Status {
+                    text: format!(
+                        "retry: {}/{} segment(s) recovered",
+                        recovered.len(),
+                        i + 1
+                    ),
+                });
+            }
+        } else {
+            warn!(
+                file = %task.file_name,
+                part = task.part,
+                "retry: gave up after all attempts"
+            );
+        }
+    }
+
+    if let Some(tx) = events {
+        let _ = tx.send(ProgressEvent::Status { text: String::new() });
+    }
+
+    Ok(recovered)
 }
 
 /// Check that every article in `segments` is retrievable via `STAT`.
@@ -2297,6 +2458,7 @@ mod tests {
             servers: Arc::new(vec![]),
             results: Mutex::new(Vec::new()),
             failures: Mutex::new(Vec::new()),
+            failed_tasks: Mutex::new(Vec::new()),
             events: None,
             cancelled: AtomicBool::new(false),
             resume: None,
