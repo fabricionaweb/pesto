@@ -1653,7 +1653,7 @@ fn pick_post_group(groups: &[String]) -> Vec<String> {
 ///
 /// - `None` → `(None, None)` — header omitted, server fills it in.
 /// - `"now"` → current UTC time formatted as RFC 2822.
-/// - `"random"` → random time within the last 30 days.
+/// - `"random"` → random time within the last 24 hours.
 /// - any other string → used verbatim (caller-supplied RFC 2822 timestamp).
 ///
 /// Returns `(rfc_2822_string, unix_timestamp_secs)`.
@@ -1669,11 +1669,14 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
             (Some(format_rfc2822(now)), Some(ts))
         }
         Some("random") => {
-            // Pick a random offset in [0, 30 days) before now.
+            // Pick a random offset in [0, 24h) before now.
+            // 24h is safe for all known NNTP servers while still breaking the
+            // obvious same-timestamp pattern that reveals articles belong to
+            // the same upload batch.
             use std::collections::hash_map::RandomState;
             use std::hash::{BuildHasher, Hasher};
             let r = RandomState::new().build_hasher().finish();
-            let offset_secs = r % (30 * 24 * 3600);
+            let offset_secs = r % (24 * 3600);
             let t = SystemTime::now()
                 .checked_sub(Duration::from_secs(offset_secs))
                 .unwrap_or(UNIX_EPOCH);
@@ -2312,6 +2315,21 @@ mod tests {
         let d = d.unwrap();
         assert!(d.ends_with("+0000"));
         assert!(ts.unwrap() > 0);
+    }
+
+    #[test]
+    fn resolve_date_random_within_24h() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (_, ts) = resolve_date(Some("random"));
+        let ts = ts.unwrap();
+        assert!(ts <= now, "random date must not be in the future");
+        assert!(
+            now - ts < 24 * 3600 + 1,
+            "random date must be within the last 24 hours"
+        );
     }
 
     #[test]
