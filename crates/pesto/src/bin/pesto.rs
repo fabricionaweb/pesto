@@ -440,7 +440,7 @@ impl Cli {
             par2_recovery_count: self.recovery_count,
             threads: self.threads,
             simd: Some(self.simd),
-            resume: if self.resume { Some(true) } else { Some(false) },
+            resume: if self.resume { Some(true) } else { None },
             verify: if self.verify { Some(true) } else { None },
             upload_rate: self
                 .rate
