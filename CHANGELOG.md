@@ -7,6 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.21] — 2026-06-09
+
+### Added
+- **Upload flags summary before posting**: a compact settings block is printed
+  below the file tree at the start of each upload showing which non-default
+  options are active (obfuscation mode, compression format, password, PAR2
+  percentage, resume, verify). Only lines that differ from the default are
+  shown, so a plain upload produces no extra output.
+- **`resume` option documented in `config.example.toml`**: the `[output]`
+  section now includes a commented-out `resume = false` entry with a full
+  description of the `.pesto-state` sidecar file lifecycle.
+
+### Changed
+- **`"random"` date window narrowed to 24 hours**: previously `date = "random"`
+  picked a timestamp anywhere in the last 30 days, causing `TooOld` rejections
+  on servers with short retention windows. The window is now 24 hours, which
+  is safe for all known NNTP servers while still preventing identical timestamps
+  across articles in the same batch.
+- **Obfuscation automatically enables random dates**: when any obfuscation mode
+  is active and no explicit `date` is configured, pesto now defaults to
+  `"random"` instead of omitting the `Date:` header. This closes the timing
+  side-channel where all articles in an obfuscated batch shared the same
+  server-assigned timestamp. Override with `--date now` or a fixed timestamp
+  if needed.
+
 ## [0.3.20] — 2026-06-09
 
 ### Fixed
