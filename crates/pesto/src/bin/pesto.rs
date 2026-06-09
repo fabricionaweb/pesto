@@ -772,6 +772,52 @@ async fn run_single_upload(
     let _ = renderer.await;
     timings.post_ms = Some(t_post.elapsed().as_millis());
 
+    // ── Retry segments that failed during the upload ──────────────────────────
+    let mut outcome = outcome;
+    if !outcome.failed_tasks.is_empty()
+        && !config.dry_run
+        && !config.par2_only
+        && !outcome.cancelled
+    {
+        let n = outcome.failed_tasks.len();
+        eprintln!("{n} segment(s) failed during upload — retrying…");
+
+        let (retry_tx, retry_renderer) = if params.json_mode {
+            pesto::progress::spawn_json_emitter()
+        } else {
+            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+        };
+
+        let recovered = pesto::poster::repost_failed_tasks(
+            config,
+            &outcome.failed_tasks,
+            &outcome.groups,
+            Some(&retry_tx),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("retry: error: {e:#}");
+            Vec::new()
+        });
+
+        drop(retry_tx);
+        let _ = retry_renderer.await;
+
+        let r = recovered.len();
+        eprintln!("retry: {r}/{n} segment(s) recovered");
+        outcome.segments.extend(recovered);
+        // Remove recovered tasks from the failure lists so they don't appear
+        // as failures in the final summary and NZB is written correctly.
+        if r == n {
+            outcome.failures.retain(|f| {
+                !outcome.failed_tasks.iter().any(|t| {
+                    f.starts_with(&t.file_name) && f.contains(&format!("{}/{}", t.part, t.total))
+                })
+            });
+            outcome.failed_tasks.clear();
+        }
+    }
+
     // ── Post-check STAT pass ──────────────────────────────────────────────────
     let check_missing: Vec<String> = if config.check
         && !config.dry_run
@@ -890,6 +936,32 @@ async fn run_single_upload(
         Vec::new()
     };
 
+    // If segments still failed after retry, refuse to write the NZB — it
+    // would be incomplete. The resume state already has all successfully
+    // posted segments so the user can continue with --resume.
+    let has_unrecoverable_failures =
+        !outcome.failed_tasks.is_empty() && !config.dry_run && !config.par2_only;
+    if has_unrecoverable_failures {
+        let n = outcome.failed_tasks.len();
+        eprintln!();
+        eprintln!("error: {n} segment(s) could not be posted after all retries.");
+        eprintln!("The NZB will NOT be written — the upload is incomplete.");
+        if let Some(ref state_path) = resume_path {
+            eprintln!();
+            eprintln!("The successfully posted segments have been saved to:");
+            eprintln!("  {}", state_path.display());
+            eprintln!();
+            let files_str = entry_paths
+                .iter()
+                .map(|p| format!("\"{}\"", p.display()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("To retry the missing segments and finish the upload, run:");
+            eprintln!("  pesto {files_str} --resume");
+        }
+        eprintln!();
+    }
+
     // Write NZB.
     // The canonical copy goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb.
     // If the user specified a destination (--out or nzb_dir), a hardlink (or
@@ -906,7 +978,11 @@ async fn run_single_upload(
 
     let _nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
-            if outcome.segments.is_empty() {
+            if has_unrecoverable_failures {
+                eprintln!("skipping nzb output — upload incomplete");
+                nzb_reported_path = None;
+                None
+            } else if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
                 nzb_reported_path = None;
                 None
@@ -1000,7 +1076,8 @@ async fn run_single_upload(
     let notify_enabled = config.notify.unwrap_or(true)
         && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
     if notify_enabled && !config.par2_only && !config.dry_run {
-        let had_failures = outcome.cancelled || !outcome.failures.is_empty();
+        let had_failures =
+            outcome.cancelled || !outcome.failures.is_empty() || has_unrecoverable_failures;
         pesto::notify::send_all(&pesto::notify::NotifyConfig {
             webhook_url: config.notify_webhook.as_deref(),
             ntfy_topic: config.notify_ntfy.as_deref(),
@@ -1050,7 +1127,8 @@ async fn run_single_upload(
     };
 
     // Run post-upload hooks only when the upload actually succeeded.
-    let upload_ok = !outcome.cancelled && outcome.failures.is_empty();
+    let upload_ok =
+        !outcome.cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
     if upload_ok && !config.par2_only && !config.dry_run {
         let hook_env = HookEnv {
             nzb_path: nzb_reported_path.as_deref(),
@@ -1104,7 +1182,9 @@ async fn run_single_upload(
         segments: outcome.segments,
         groups: outcome.groups,
         cancelled: outcome.cancelled,
-        had_failures: !outcome.failures.is_empty() || !check_missing.is_empty(),
+        had_failures: !outcome.failures.is_empty()
+            || !check_missing.is_empty()
+            || has_unrecoverable_failures,
     })
 }
 
