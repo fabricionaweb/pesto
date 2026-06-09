@@ -454,6 +454,16 @@ everything in a new `pesto::upload::run_upload()` public API.
   - `nzb_dir/` and any other subdirectory — manually placed NZBs (badge `m` gray)
 - [x] **Fully recursive vault scan** — `collect_nzbs_recursive()` walks all subdirectories at any depth; origin derived from immediate parent folder name
 
+### Phase 46 — Obfuscation overhaul (v0.3.18) ✅
+
+- [x] **NZB filename fix** — `--obfuscate=full` was writing a random name to the `name=` attribute in the `.nzb`, breaking download clients without PAR2. The NZB now always carries the real filename; only the wire subject and yEnc `name=` are obfuscated.
+- [x] **NZB groups fix** — the NZB listed all configured groups instead of only the one actually used for posting. `PostOutcome.groups` now surfaces the real posted group.
+- [x] **`ObfuscateMode::Subject` removed** — the half-obfuscation mode that only hid the subject line (not the yEnc `name=`) was misleading and has been dropped.
+- [x] **Schizo-style randomisation** — obfuscated subjects and yEnc names are now variable-length (10–30 chars) alphanumeric strings (`[A-Za-z0-9]`) instead of a fixed 32-char hex string, eliminating the fingerprint that made obfuscated posts identifiable.
+- [x] **Random TLD in `From` header** — the generated sender domain uses a random 2–5 character alphabetic TLD instead of a fixed list of real TLDs.
+- [x] **Per-file `From` rotation in `full` mode** — each file in a batch gets a distinct random sender address.
+- [x] **`--obfuscate=paranoid` (experimental)** — every individual article gets a unique subject and `From` header, making segment grouping by wire metadata impossible. Hidden from `--help`; requires the NZB to download.
+
 ---
 
 ## Deferred / Intentionally Not Implemented
