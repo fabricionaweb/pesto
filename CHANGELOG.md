@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.19] — 2026-06-09
+
+### Added
+- **Automatic retry of upload failures**: segments that fail during the main
+  upload run (e.g. `NNTP connection closed by server`) are now automatically
+  reposted before the check STAT pass. A fresh `Message-ID` is generated so
+  the recovered segment is fully valid. Retries honour the configured
+  `retries` and `retry_delay` values.
+- **`FailedTask` in `PostOutcome`**: the public API now exposes
+  `PostOutcome::failed_tasks` — a typed list of segments that could not be
+  posted, carrying enough information for callers to attempt their own retry
+  logic.
+- **`repost_failed_tasks` public function**: re-posts a slice of `FailedTask`
+  values with fresh `Message-ID`s and returns the resulting `PostedSegment`s.
+
+### Changed
+- **NZB is not written when segments remain unrecoverable**: if one or more
+  segments still fail after all retry attempts, the NZB file is withheld to
+  prevent an incomplete NZB from reaching download clients. The resume state
+  file is preserved and the exact `--resume` command is printed so the upload
+  can be completed later.
+- **Exit code 1 on unrecoverable failures**: the process now exits with a
+  non-zero code when any segment could not be posted even after retry,
+  making the failure visible to scripts, automation, and Sonarr/Radarr hooks.
+- Notifications and post-upload hooks are skipped (marked as failed) when
+  there are unrecoverable segment failures.
+
 ## [0.3.18] — 2026-06-08
 
 ### Added
