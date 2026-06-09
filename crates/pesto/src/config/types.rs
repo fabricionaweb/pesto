@@ -62,6 +62,11 @@ pub enum ObfuscateMode {
     /// Randomise subject and yEnc `name=` on the wire; the NZB always carries
     /// the real filename so download clients work without PAR2 recovery.
     Full,
+    /// Like `full` but each individual article gets a unique subject and From
+    /// header, making segment grouping by wire metadata impossible.
+    /// Experimental — requires the NZB to download.
+    #[value(hide = true)]
+    Paranoid,
 }
 
 /// A per-server entry as parsed from `[[servers]]` in the TOML file.

@@ -138,8 +138,8 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `subject` or `full`. A bare `--obfuscate`
-    /// means `full` [config: posting.obfuscate, default none].
+    /// Obfuscation mode: `none`, `full`. A bare `--obfuscate` means `full`
+    /// [config: posting.obfuscate, default none].
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
           default_missing_value = "full", require_equals = true)]
     obfuscate: Option<ObfuscateMode>,
@@ -579,7 +579,7 @@ async fn run_single_upload(
             })
             .unwrap_or_else(|| "archive".to_string());
 
-        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+        let archive_stem = if config.obfuscate != ObfuscateMode::None {
             pesto::article::obfuscated_name()
         } else {
             archive_stem
