@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`check_delay` in the config file now implies `check`**: the post-upload
+  STAT check was only auto-enabled when `--check-delay` was passed on the CLI.
+  Setting `posting.check_delay` in `config.toml` without an explicit
+  `check = true` silently skipped the check; it now enables it, matching the
+  documented CLI behaviour. (#17)
+- **Every segment of a file now shares one `Date:` header**: in full obfuscation
+  with `date = "random"`, the date was resolved once per *segment*, so each
+  segment of a file got a different wire timestamp while the `.nzb` records a
+  single date per file — the wire and the NZB disagreed for all but the first
+  segment. The date is now resolved once per file and threaded through to every
+  segment; paranoid mode keeps its per-article dates. Fixed dates and
+  retry/repost dates are also preserved exactly instead of being regenerated.
+  (#16)
+
 ## [0.3.22] — 2026-06-10
 
 ### Added
