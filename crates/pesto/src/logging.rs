@@ -14,11 +14,14 @@
 //! analysed later even when the terminal was not run with `-vv`.
 
 use std::fs::File;
+use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use anyhow::Result;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
@@ -97,6 +100,116 @@ pub fn init(verbose: u8, log_file: Option<&Path>, session_log: Option<&Path>) ->
 
     Ok(())
 }
+
+// ─── Dynamic writer (for TUI callers like upapasta) ─────────────────────────
+
+/// An `io::Write` impl that forwards to an optional `File`; discards when None.
+struct OptionWriter(Option<File>);
+
+impl io::Write for OptionWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.0 {
+            Some(f) => f.write(buf),
+            None => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.0 {
+            Some(f) => f.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A tracing writer whose destination can be swapped at runtime.
+///
+/// Used by upapasta to route pesto's internal tracing events to a per-upload
+/// session log file without reinitialising the global subscriber.
+#[derive(Clone)]
+pub struct DynamicFileWriter {
+    inner: Arc<Mutex<OptionWriter>>,
+}
+
+impl DynamicFileWriter {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(OptionWriter(None))),
+        }
+    }
+
+    /// Route subsequent tracing events to `path` (opened for appending).
+    pub fn set(&self, path: &Path) -> Result<()> {
+        let file = open_append(path)?;
+        *self.inner.lock().unwrap() = OptionWriter(Some(file));
+        Ok(())
+    }
+
+    /// Stop writing; events are silently discarded until the next `set` call.
+    pub fn clear(&self) {
+        *self.inner.lock().unwrap() = OptionWriter(None);
+    }
+}
+
+pub struct GuardWriter<'a>(MutexGuard<'a, OptionWriter>);
+
+impl<'a> io::Write for GuardWriter<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<'a> MakeWriter<'a> for DynamicFileWriter {
+    type Writer = GuardWriter<'a>;
+
+    fn make_writer(&'a self) -> GuardWriter<'a> {
+        GuardWriter(self.inner.lock().unwrap())
+    }
+}
+
+static DYNAMIC_WRITER: OnceLock<DynamicFileWriter> = OnceLock::new();
+
+/// Initialise a DEBUG-level tracing subscriber that writes to a swappable file.
+///
+/// Intended for TUI callers (upapasta) where stderr is occupied by the terminal
+/// renderer. Call [`set_session_log`] before each upload and
+/// [`clear_session_log`] when done to rotate the destination file.
+///
+/// Like [`init`], subsequent calls are no-ops (the global subscriber is set once).
+pub fn init_for_tui() -> Result<()> {
+    let writer = DynamicFileWriter::new();
+    let _ = DYNAMIC_WRITER.set(writer.clone());
+
+    let layer = fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_filter(LevelFilter::DEBUG)
+        .boxed();
+
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::set_global_default(subscriber).ok();
+
+    Ok(())
+}
+
+/// Point the active TUI session log at `path` (appended to, created if absent).
+pub fn set_session_log(path: &Path) -> Result<()> {
+    if let Some(w) = DYNAMIC_WRITER.get() {
+        w.set(path)?;
+    }
+    Ok(())
+}
+
+/// Stop writing the current session log; events are discarded until the next upload.
+pub fn clear_session_log() {
+    if let Some(w) = DYNAMIC_WRITER.get() {
+        w.clear();
+    }
+}
+
+// ─── Verbose terminal / file output ─────────────────────────────────────────
 
 /// Return `true` when the active log level is DEBUG or finer, which means
 /// NNTP command traces are being emitted. The caller can use this to suppress

@@ -1579,7 +1579,11 @@ async fn worker(
                     // iter_mut borrow is dropped here; safe to index pipe_results.
                     if let Some((from, msg)) = fail_at {
                         for r in pipe_results[from..].iter_mut() {
-                            *r = Err(msg.clone());
+                            // Remaining articles in the batch never received a
+                            // response — the connection was lost after the first
+                            // rejection. Use a distinct message so the log does
+                            // not falsely repeat the first article's message-id.
+                            *r = Err("pipeline interrupted after previous failure".into());
                         }
                         break 'use_conn (true, msg);
                     }
