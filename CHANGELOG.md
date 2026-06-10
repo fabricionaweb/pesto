@@ -7,6 +7,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.22] — 2026-06-10
+
+### Added
+- **Per-upload debug log saved with the history**: every upload now writes a
+  DEBUG-level log to `<history_dir>/logs/<timestamp>_<name>.log`, independent of
+  the `-v` flag, so any run can be analysed afterwards — including exactly which
+  articles a server rejected and why — without reproducing it with `-vv`. Only
+  the 50 most recent pesto logs are kept; files that don't match pesto's naming
+  (e.g. legacy upapasta logs sharing the directory) are never pruned. Disable
+  per-run with `--no-session-log` or permanently with `output.session_log = false`.
+- **Per-article `Date` header logged at DEBUG**: each posted article now logs its
+  generated `Date:` value next to its `Message-ID`, so `TooOld`/duplicate
+  rejections can be traced to the exact timestamp that triggered them.
+
+### Changed
+- **`"random"` date window narrowed from 24 hours to 2 hours**: the 24-hour
+  window still tripped `441 437 ... TooOld` rejections on some servers (e.g.
+  blocknews) for the random subset of articles whose `Date` landed near the old
+  end of the window, failing a small group of segments on every obfuscated
+  upload. The window is now 2 hours, which stays well inside server acceptance
+  limits while still preventing identical timestamps across a batch.
+
 ## [0.3.21] — 2026-06-09
 
 ### Added
