@@ -235,7 +235,8 @@ impl Config {
             check: cli
                 .check
                 .unwrap_or_else(|| file.posting.check.unwrap_or(false))
-                || cli.check_delay_secs.is_some(),
+                || cli.check_delay_secs.is_some()
+                || file.posting.check_delay.is_some(),
             check_retries: cli
                 .check_retries
                 .unwrap_or_else(|| file.posting.check_retries.unwrap_or(3)),
