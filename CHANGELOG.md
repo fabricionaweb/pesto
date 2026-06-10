@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **upapasta now writes verbose per-upload session logs**: pesto's internal
+  DEBUG traces (NNTP connections, retries, per-segment results) are routed to a
+  timestamped file in `~/.config/upapasta/logs/` for each upload, mirroring
+  what the pesto CLI already does. All progress events are also written to
+  `upload.log` without filtering.
+
+### Fixed
+- **Pipeline error messages no longer repeat the first rejection's message-id**:
+  when a pipelined batch fails mid-way, articles that never received a server
+  response were logged with the same error text (including the message-id) as
+  the first rejected article. They now log `"pipeline interrupted after previous
+  failure"`, making it clear which article was actually rejected by the server.
+
 ### Fixed
 - **`check_delay` in the config file now implies `check`**: the post-upload
   STAT check was only auto-enabled when `--check-delay` was passed on the CLI.
