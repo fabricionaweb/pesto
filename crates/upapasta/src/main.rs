@@ -49,6 +49,11 @@ async fn main() -> io::Result<()> {
 
     let upload_log_path = crate::catalog::default_log_path();
 
+    // Initialise pesto's tracing subscriber to write DEBUG-level session logs.
+    // No stderr output — the TUI owns the terminal. The writer is redirected to
+    // a per-upload file via set_session_log() inside run_real_upload().
+    let _ = pesto::logging::init_for_tui();
+
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -582,16 +587,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     _ => {}
                 },
                 AppEvent::Progress(msg) => {
-                    // Persist lines that are meaningful for post-session review.
                     if let Some(lp) = upload_log_path {
                         let m = msg.trim();
-                        if m.starts_with("===")
-                            || m.starts_with("wrote nzb")
-                            || m.starts_with("wrote nfo")
-                            || m.starts_with("PostOutcome")
-                            || m.starts_with("FAILED")
-                            || m.starts_with("Segment FAILED")
-                        {
+                        if !m.is_empty() {
                             crate::catalog::append_upload_log(lp, m);
                         }
                     }
@@ -1794,6 +1792,17 @@ async fn run_real_upload(
     tx: mpsc::UnboundedSender<AppEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<pesto::upload::UploadOutcome> {
+    // Route pesto's internal DEBUG traces to a per-upload session log file.
+    // This mirrors what the pesto CLI does via --session-log.
+    let session_log_path = pesto::history::session_log_path(
+        config.history_dir.as_deref(),
+        &label,
+        50,
+    );
+    if let Some(ref p) = session_log_path {
+        let _ = pesto::logging::set_session_log(p);
+    }
+
     // Bridge CancellationToken → AtomicBool (pesto's cancel mechanism).
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
@@ -1938,6 +1947,9 @@ async fn run_real_upload(
         outcome.segments.len(),
         outcome.had_failures,
     )));
+
+    // Stop writing pesto's traces to the per-upload file.
+    pesto::logging::clear_session_log();
 
     Ok(outcome)
 }
