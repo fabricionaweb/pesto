@@ -196,7 +196,7 @@ fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
                 // Redact -p<pass>, -hp<pass>, -p<pass> patterns (7z / rar).
                 if (s.starts_with("-p") || s.starts_with("-hp")) && s.len() > 3 {
                     let prefix = if s.starts_with("-hp") { "-hp" } else { "-p" };
-                    format!("{prefix}[MASKED]")
+                    format!("{prefix}<redacted>")
                 } else {
                     s.into_owned()
                 }
