@@ -444,25 +444,17 @@ pub async fn post_files_with_progress_and_cancel(
     let cancel_handle = {
         let shared = shared.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = async {
-                    if let Some(ref flag) = external_cancel {
-                        loop {
-                            if flag.load(Ordering::Relaxed) { break; }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                        }
-                    } else {
-                        std::future::pending::<()>().await;
+            if let Some(ref flag) = external_cancel {
+                loop {
+                    if flag.load(Ordering::Relaxed) {
+                        break;
                     }
-                } => {
-                    shared.cancelled.store(true, Ordering::Relaxed);
-                    shared.emit(ProgressEvent::Interrupted);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    shared.cancelled.store(true, Ordering::Relaxed);
-                    shared.emit(ProgressEvent::Interrupted);
-                }
+                shared.cancelled.store(true, Ordering::Relaxed);
+                shared.emit(ProgressEvent::Interrupted);
+            } else {
+                std::future::pending::<()>().await;
             }
         })
     };
@@ -1807,6 +1799,7 @@ pub async fn repost_missing_segments(
     all_segments: &[PostedSegment],
     missing_ids: &[String],
     events: Option<&ProgressSender>,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<usize> {
     if missing_ids.is_empty() {
         return Ok(0);
@@ -1833,6 +1826,9 @@ pub async fn repost_missing_segments(
     let mut reposted = 0usize;
 
     for seg in &to_repost {
+        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            break;
+        }
         // Derive the file path from the segment's file_name relative to the
         // working directory. This matches how InputFile paths are resolved.
         let path = PathBuf::from(&seg.file_name);
@@ -1901,6 +1897,9 @@ pub async fn repost_missing_segments(
                             });
                         }
                         if attempt < max_retries {
+                            if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                                break;
+                            }
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
@@ -1913,6 +1912,9 @@ pub async fn repost_missing_segments(
                         });
                     }
                     if attempt < max_retries {
+                        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -1957,6 +1959,7 @@ pub async fn repost_failed_tasks(
     failed: &[FailedTask],
     groups: &[String],
     events: Option<&ProgressSender>,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<Vec<PostedSegment>> {
     if failed.is_empty() {
         return Ok(Vec::new());
@@ -1973,6 +1976,9 @@ pub async fn repost_failed_tasks(
     let mut recovered: Vec<PostedSegment> = Vec::new();
 
     for (i, task) in failed.iter().enumerate() {
+        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            break;
+        }
         let offset = (task.part as u64 - 1) * article_size;
         let read_len = (task.file_size - offset).min(article_size) as usize;
 
@@ -2035,6 +2041,9 @@ pub async fn repost_failed_tasks(
                         slot.invalidate();
                         warn!(file = %task.file_name, part = task.part, attempt, "retry attempt failed: {e}");
                         if attempt < max_retries {
+                            if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                                break;
+                            }
                             tokio::time::sleep(Duration::from_secs(config.retry_delay)).await;
                         }
                     }
@@ -2042,6 +2051,9 @@ pub async fn repost_failed_tasks(
                 Err(e) => {
                     warn!(attempt, "retry: connect failed: {e}");
                     if attempt < max_retries {
+                        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_secs(config.retry_delay)).await;
                     }
                 }
@@ -2096,6 +2108,7 @@ pub async fn check_articles(
     config: &Config,
     segments: &[PostedSegment],
     events: Option<&ProgressSender>,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<Vec<String>> {
     if segments.is_empty() {
         return Ok(Vec::new());
@@ -2111,6 +2124,9 @@ pub async fn check_articles(
     if config.check_delay_secs > 0 {
         let mut remaining = config.check_delay_secs;
         while remaining > 0 {
+            if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                break;
+            }
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::CheckWaiting {
                     remaining_secs: remaining,
@@ -2146,6 +2162,7 @@ pub async fn check_articles(
     };
 
     let events_tx: Option<ProgressSender> = events.cloned();
+    let cancel_flag: Option<Arc<AtomicBool>> = cancel.map(Arc::clone);
 
     let mut handles = Vec::with_capacity(n_workers);
     for (worker_idx, chunk) in chunks.into_iter().enumerate() {
@@ -2153,6 +2170,7 @@ pub async fn check_articles(
         let missing_ids = Arc::clone(&missing_ids);
         let done_count = Arc::clone(&done_count);
         let tx = events_tx.clone();
+        let worker_cancel = cancel_flag.clone();
 
         handles.push(tokio::spawn(async move {
             let server_idx = if servers.is_empty() {
@@ -2163,8 +2181,20 @@ pub async fn check_articles(
             let mut slot = ConnectionSlot::new(Arc::clone(&servers), server_idx);
 
             for seg in &chunk {
+                if worker_cancel
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Relaxed))
+                {
+                    break;
+                }
                 let mut found = false;
                 for attempt in 1..=max_attempts {
+                    if worker_cancel
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
                     match slot.ensure_connected().await {
                         Ok(conn) => match conn.stat(&seg.message_id).await {
                             Ok(true) => {
@@ -2173,6 +2203,12 @@ pub async fn check_articles(
                             }
                             Ok(false) => {
                                 if attempt < max_attempts {
+                                    if worker_cancel
+                                        .as_ref()
+                                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                                    {
+                                        break;
+                                    }
                                     let delay = 20u64;
                                     if let Some(tx) = &tx {
                                         let _ = tx.send(ProgressEvent::CheckRetrying {
@@ -2187,12 +2223,24 @@ pub async fn check_articles(
                             Err(_) => {
                                 slot.invalidate();
                                 if attempt < max_attempts {
+                                    if worker_cancel
+                                        .as_ref()
+                                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                                    {
+                                        break;
+                                    }
                                     tokio::time::sleep(Duration::from_secs(2)).await;
                                 }
                             }
                         },
                         Err(_) => {
                             if attempt < max_attempts {
+                                if worker_cancel
+                                    .as_ref()
+                                    .is_some_and(|f| f.load(Ordering::Relaxed))
+                                {
+                                    break;
+                                }
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             }
                         }
@@ -2221,8 +2269,13 @@ pub async fn check_articles(
         .unwrap();
 
     let failed = missing.len() as u64;
+    let cancelled = cancel.is_some_and(|f| f.load(Ordering::Relaxed));
     if let Some(tx) = events {
-        let _ = tx.send(ProgressEvent::CheckDone { failed });
+        if cancelled {
+            let _ = tx.send(ProgressEvent::Interrupted);
+        } else {
+            let _ = tx.send(ProgressEvent::CheckDone { failed });
+        }
     }
 
     Ok(missing)
