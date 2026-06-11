@@ -2042,6 +2042,17 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
         E::Finished => "=== Pesto run finished ===".into(),
         E::Failed { description } => format!("FAILED: {}", description),
         E::Interrupted => "Interrupted by user".into(),
+        E::CheckStarted { total } => format!("Checking {total} articles via STAT…"),
+        E::CheckDone { failed } if *failed == 0 => "✓ Check: all articles verified".into(),
+        E::CheckDone { failed } => format!("✗ Check: {failed} article(s) missing — reposting…"),
+        E::CheckRetrying {
+            attempt,
+            max_attempts,
+            delay_secs,
+        } => format!("Check retry {attempt}/{max_attempts} (waiting {delay_secs}s)…"),
+        E::CheckWaiting { remaining_secs } => {
+            format!("Check: waiting {remaining_secs}s before retry…")
+        }
         _ => String::new(), // many low-level events are too noisy for the TUI log
     }
 }
@@ -2205,10 +2216,10 @@ fn extract_progress_update(
             total_segments: previous.total_segments,
             done_bytes: previous.done_bytes,
             total_bytes: previous.total_bytes,
-            current_speed_mbps: previous.current_speed_mbps,
+            current_speed_mbps: 0.0,
             message: None,
             file_update: None,
-            phase: Some(UploadPhase::Verifying {
+            phase: Some(UploadPhase::Checking {
                 checked: 0,
                 total: *total,
             }),
@@ -2222,15 +2233,52 @@ fn extract_progress_update(
             total_segments: previous.total_segments,
             done_bytes: previous.done_bytes,
             total_bytes: previous.total_bytes,
-            current_speed_mbps: previous.current_speed_mbps,
+            current_speed_mbps: 0.0,
             message: None,
             file_update: None,
-            phase: Some(UploadPhase::Verifying {
+            phase: Some(UploadPhase::Checking {
                 checked: *checked,
                 total: match &previous.phase {
-                    Some(UploadPhase::Verifying { total, .. }) => *total,
+                    Some(UploadPhase::Checking { total, .. }) => *total,
                     _ => 0,
                 },
+            }),
+            par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
+        }),
+        E::CheckDone { failed } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: 0.0,
+            message: None,
+            file_update: None,
+            phase: if *failed > 0 {
+                Some(UploadPhase::Reposting { missing: *failed })
+            } else {
+                Some(UploadPhase::Done)
+            },
+            par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
+        }),
+        E::CheckRetrying { .. } => Some(ProgressUpdate {
+            done_segments: previous.done_segments,
+            total_segments: previous.total_segments,
+            done_bytes: previous.done_bytes,
+            total_bytes: previous.total_bytes,
+            current_speed_mbps: 0.0,
+            message: None,
+            file_update: None,
+            phase: Some(match &previous.phase {
+                Some(UploadPhase::Reposting { missing }) => {
+                    UploadPhase::Reposting { missing: *missing }
+                }
+                _ => UploadPhase::Reposting { missing: 0 },
             }),
             par2_slices: None,
             queue_extended: None,
