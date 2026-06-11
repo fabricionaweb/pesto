@@ -15,6 +15,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `upload.log` without filtering.
 
 ### Changed
+- **Session log always ends with a one-line summary**: after every upload
+  (success, failure, or cancel) a structured summary line is appended to the
+  session log file, e.g.
+  `2026-06-11T16:20:11Z  summary  status=ok  label="Movie.mkv"  bytes=4321.5MiB  nzb=Movie.nzb`.
+  The file is never empty after a run; `tail -1` is a reliable way to check
+  the outcome of any past upload.
 - **Session logs now record only errors and warnings by default**: the
   per-upload session log (written to `~/.config/upapasta/logs/` and the pesto
   CLI equivalent) was previously fixed at DEBUG level, capturing every NNTP

@@ -525,6 +525,8 @@ struct UploadResult {
     groups: Vec<String>,
     cancelled: bool,
     had_failures: bool,
+    total_bytes: u64,
+    nzb_path: Option<PathBuf>,
 }
 
 /// Per-phase wall-clock timing accumulated during a single upload (26g).
@@ -1254,6 +1256,8 @@ async fn run_single_upload(
         had_failures: !outcome.failures.is_empty()
             || !check_missing.is_empty()
             || has_unrecoverable_failures,
+        total_bytes,
+        nzb_path: nzb_reported_path,
     })
 }
 
@@ -1826,6 +1830,48 @@ fn season_key(stem: &str) -> Option<String> {
     None
 }
 
+/// Append a one-line structured summary to the session log file.
+///
+/// Written after the upload completes so it is always the last line, making
+/// `tail -1` a reliable way to check the outcome of any upload.
+fn write_session_summary(
+    path: &Path,
+    label: &str,
+    cancelled: bool,
+    had_failures: bool,
+    total_bytes: u64,
+    nzb_path: Option<&Path>,
+) {
+    use std::io::Write;
+
+    let status = if cancelled {
+        "cancelled"
+    } else if had_failures {
+        "failed"
+    } else {
+        "ok"
+    };
+
+    let total_mb = total_bytes as f64 / 1_048_576.0;
+    let nzb = nzb_path
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("-");
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let line = format!(
+        "{now}  summary  status={status}  label=\"{label}\"  bytes={total_mb:.1}MiB  nzb={nzb}\n"
+    );
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -2045,6 +2091,17 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(&params, &cli.files, &label).await?;
+
+    if let Some(ref p) = session_log {
+        write_session_summary(
+            p,
+            &label,
+            result.cancelled,
+            result.had_failures,
+            result.total_bytes,
+            result.nzb_path.as_deref(),
+        );
+    }
 
     if result.cancelled {
         std::process::exit(130);

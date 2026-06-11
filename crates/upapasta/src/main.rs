@@ -1945,10 +1945,60 @@ async fn run_real_upload(
         outcome.had_failures,
     )));
 
+    // Write a one-line summary to the session log before closing it. This
+    // ensures the file is never empty: even a clean run leaves a record with
+    // segment count, byte total, and final status.
+    if let Some(ref p) = session_log_path {
+        write_session_summary(p, &label, &outcome);
+    }
+
     // Stop writing pesto's traces to the per-upload file.
     pesto::logging::clear_session_log();
 
     Ok(outcome)
+}
+
+/// Append a one-line structured summary to the session log file.
+///
+/// Written after all tracing events so it is always the last line, making
+/// `tail -1` a reliable way to check the outcome of any upload.
+fn write_session_summary(
+    path: &std::path::Path,
+    label: &str,
+    outcome: &pesto::upload::UploadOutcome,
+) {
+    use std::io::Write;
+
+    let status = if outcome.cancelled {
+        "cancelled"
+    } else if outcome.had_failures {
+        "failed"
+    } else {
+        "ok"
+    };
+
+    let total_mb = outcome.total_bytes as f64 / 1_048_576.0;
+    let nzb = outcome
+        .nzb_path
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("-");
+
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let line = format!(
+        "{now}  summary  status={status}  label=\"{label}\"  segments={}  bytes={:.1}MiB  nzb={nzb}\n",
+        outcome.segments.len(),
+        total_mb,
+    );
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// Convert rich pesto ProgressEvent into a single-line string for the log.
