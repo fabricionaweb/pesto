@@ -15,6 +15,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `upload.log` without filtering.
 
 ### Added
+- **CHECK progress bar in the upapasta dashboard**: when the post-upload STAT
+  check is running, a dedicated `CHECK` bar appears below the UPLOAD bar showing
+  `checked/total articles` with a cyan progress gauge. If missing articles are
+  found, the bar turns yellow and shows `Reposting N missing article(s)…` while
+  the reposts are in flight.
+- **Check events now emit log lines in the dashboard**: `CheckStarted`,
+  `CheckDone` (✓ or ✗), `CheckRetrying`, and `CheckWaiting` all produce
+  visible lines in the Logs panel so the user can see the outcome without
+  inspecting the session log file.
 - **Check toggle in the upapasta upload panel**: the post-upload STAT check
   (`check`) is now exposed as a toggleable field in the upload confirmation
   panel (alongside Verify). Toggle with `←→` or `Enter`; the setting is

@@ -28,6 +28,15 @@ pub enum UploadPhase {
         checked: u64,
         total: u64,
     },
+    /// Post-upload STAT check pass.
+    Checking {
+        checked: u64,
+        total: u64,
+    },
+    /// Reposting articles that failed the check.
+    Reposting {
+        missing: u64,
+    },
     Done,
 }
 

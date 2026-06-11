@@ -897,28 +897,38 @@ fn draw_dashboard_idle(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_upload_progress_screen(f: &mut Frame, app: &mut App, area: Rect) {
-    // Layout: three progress bars + sparkline on top; per-file + log below.
+    use crate::events::UploadPhase;
+    let is_checking = matches!(
+        app.progress.phase,
+        UploadPhase::Checking { .. } | UploadPhase::Reposting { .. }
+    );
+
+    // Layout: three progress bars + optional check bar + sparkline on top; per-file + log below.
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Compress bar
-            Constraint::Length(3), // PAR2 bar
-            Constraint::Length(3), // Upload bar (primary)
-            Constraint::Length(3), // Speed sparkline
-            Constraint::Min(4),    // Per-file (left) + Log (right)
+            Constraint::Length(3),                               // Compress bar
+            Constraint::Length(3),                               // PAR2 bar
+            Constraint::Length(3),                               // Upload bar (primary)
+            Constraint::Length(if is_checking { 3 } else { 0 }), // Check bar
+            Constraint::Length(3),                               // Speed sparkline
+            Constraint::Min(4),                                  // Per-file + Log
         ])
         .split(area);
 
     draw_compress_bar(f, app, vchunks[0]);
     draw_par2_bar(f, app, vchunks[1]);
     draw_upload_bar(f, app, vchunks[2]);
-    draw_speed_sparkline(f, app, vchunks[3]);
+    if is_checking {
+        draw_check_bar(f, app, vchunks[3]);
+    }
+    draw_speed_sparkline(f, app, vchunks[4]);
 
     // Bottom: per-file list left + log right
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(vchunks[4]);
+        .split(vchunks[5]);
 
     if !app.progress.files.is_empty() {
         draw_per_file_progress(f, app, bottom[0]);
@@ -1114,6 +1124,51 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
         )
         .gauge_style(gauge_style)
         .percent(upload_pct)
+        .label(label);
+    f.render_widget(gauge, area);
+}
+
+fn draw_check_bar(f: &mut Frame, app: &App, area: Rect) {
+    use crate::events::UploadPhase;
+
+    let (pct, label, color) = match app.progress.phase {
+        UploadPhase::Checking { checked, total } => {
+            let pct = checked
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(total))
+                .unwrap_or(0)
+                .min(100) as u16;
+            let label = format!("{}%  {}/{} articles", pct, checked, total);
+            (pct, label, Color::Cyan)
+        }
+        UploadPhase::Reposting { missing } => {
+            let label = if missing > 0 {
+                format!("Reposting {} missing article(s)…", missing)
+            } else {
+                "Reposting…".into()
+            };
+            (100, label, Color::Yellow)
+        }
+        _ => return,
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    " CHECK ",
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(color)),
+        )
+        .gauge_style(
+            Style::default()
+                .fg(color)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .percent(pct)
         .label(label);
     f.render_widget(gauge, area);
 }
