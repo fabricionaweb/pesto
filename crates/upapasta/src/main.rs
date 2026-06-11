@@ -1794,11 +1794,8 @@ async fn run_real_upload(
 ) -> anyhow::Result<pesto::upload::UploadOutcome> {
     // Route pesto's internal DEBUG traces to a per-upload session log file.
     // This mirrors what the pesto CLI does via --session-log.
-    let session_log_path = pesto::history::session_log_path(
-        config.history_dir.as_deref(),
-        &label,
-        50,
-    );
+    let session_log_path =
+        pesto::history::session_log_path(config.history_dir.as_deref(), &label, 50);
     if let Some(ref p) = session_log_path {
         let _ = pesto::logging::set_session_log(p);
     }
