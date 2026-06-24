@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`generic-indexer` hook: automatic screenshots for video releases** — when
+  the uploaded file is a video (mkv, mp4, m2ts, etc.), the hook now captures
+  6 evenly-spaced frames via `ffmpeg` (at 10 / 24 / 38 / 52 / 66 / 80 % of
+  the total duration, avoiding intros and credits), uploads each frame to
+  ImgBB, and passes the resulting URLs to the indexer via the
+  `screenshot_urls` field. Screenshots are captured at the video's **native
+  resolution** (no forced rescaling). If `ffmpeg`, `ffprobe`, or `jq` are not
+  available, a warning is printed and the hook proceeds without screenshots.
+  The ImgBB API key is set at the top of each script. Implemented for all
+  three variants: `generic-indexer.sh`, `generic-indexer.ps1`, and
+  `generic-indexer.bat`.
+
 ---
 
 ## [0.3.30] — 2026-06-23
