@@ -468,6 +468,27 @@ pub async fn post_files_with_progress_and_cancel(
         par2_bytes_hint,
     });
 
+    // Warn when the release contains 0-byte files: download clients identify
+    // obfuscated files by their md5_16k hash and cannot match empty files,
+    // so they end up misplaced after download.  Compression (--compress=rar
+    // or --compress=7z) avoids the issue entirely.
+    let zero_byte_names: Vec<&str> = metas
+        .iter()
+        .filter(|m| m.size == 0)
+        .map(|m| wire_name(&m.real_name))
+        .collect();
+    if !zero_byte_names.is_empty() {
+        let names = zero_byte_names.join(", ");
+        shared.emit(ProgressEvent::Status {
+            text: format!(
+                "warning: release contains {n} empty file(s) ({names}); \
+                 download clients cannot place empty files automatically — \
+                 consider using --compress=rar or --compress=7z",
+                n = zero_byte_names.len(),
+            ),
+        });
+    }
+
     let cancel_handle = {
         let shared = shared.clone();
         tokio::spawn(async move {
