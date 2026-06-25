@@ -7,9 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.31] — 2026-06-25
+
 ### Fixed
-- **PAR2 file descriptions correct for directory uploads** — two bugs affected
-  releases posted as directories (e.g. DVD `VIDEO_TS/` trees):
+- **Release label truncated for directory inputs** — `file_stem()` strips
+  everything after the last dot, so a release like
+  `Show.S01.NTSC.DVD.DD5.1-Group` posted as a directory would have its label
+  (and therefore `PESTO_NAME`, NZB filename, and NFO filename) truncated to
+  `Show.S01.NTSC.DVD.DD5` at the hook stage. The fix applies `file_stem()`
+  only when the input path has a recognised media or archive extension (mkv,
+  mp4, avi, ts, m2ts, iso, rar, zip, 7z, …); directory inputs and names
+  without such an extension use the full `file_name()` unchanged.
+
+- **PAR2 file descriptions correct for directory uploads**
 
   1. *Wire name stripping*: PAR2 File Descriptions and yEnc subjects now use
      the path relative to the release root (first component stripped).
