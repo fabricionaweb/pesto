@@ -2152,14 +2152,26 @@ async fn main() -> Result<()> {
     // Derive a human-readable label from the first input path without any
     // blocking filesystem calls (no is_dir/stat in the async executor).
     // file_name() returns the last path component; we strip a known extension
-    // with file_stem() only when the OsStr round-trip gives us one.
+    // Strip the extension only for known media file types. Release names that
+    // contain dots (e.g. "Show.S01E01.720p.BluRay-Group") must not be trimmed
+    // by file_stem(), which would drop everything after the last dot.
+    const STRIP_EXTS: &[&str] = &[
+        "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "flv", "webm", "mpg", "mpeg", "vob",
+        "iso", "nzb", "zip", "rar", "7z", "tar", "gz", "bz2", "cbz", "cbr", "pdf", "epub",
+    ];
     let label = cli
         .files
         .first()
         .and_then(|p| p.file_name())
         .map(|s| {
+            let name = s.to_string_lossy();
             let p = std::path::Path::new(s);
-            p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+            match p.extension().and_then(|e| e.to_str()) {
+                Some(ext) if STRIP_EXTS.contains(&ext.to_ascii_lowercase().as_str()) => {
+                    p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+                }
+                _ => name.into_owned(),
+            }
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(&params, &cli.files, &label, Some(&cancel)).await?;
