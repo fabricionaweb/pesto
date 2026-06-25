@@ -311,14 +311,23 @@ pub async fn post_files_with_progress_and_cancel(
         // `real_name` is the published name: a relative path like
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
+        let size = md.len();
         let (subject_name, yenc_name, from) = match config.obfuscate {
             ObfuscateMode::None => {
                 let wn = wire_name(&real_name).to_string();
                 (wn.clone(), wn, config.from.clone())
             }
             ObfuscateMode::Full | ObfuscateMode::Paranoid => {
-                let obfuscated = obfuscated_name();
-                (obfuscated.clone(), obfuscated, random_from())
+                // 0-byte files have no content to protect; use the real name
+                // so download clients (e.g. SABnzbd) can place them correctly
+                // without needing md5_16k matching (which fails for empty files).
+                if size == 0 {
+                    let wn = wire_name(&real_name).to_string();
+                    (wn.clone(), wn, random_from())
+                } else {
+                    let obfuscated = obfuscated_name();
+                    (obfuscated.clone(), obfuscated, random_from())
+                }
             }
         };
         let date = resolve_date(config.date.as_deref());
