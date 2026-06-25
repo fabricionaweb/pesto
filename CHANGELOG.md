@@ -7,7 +7,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **PAR2 file descriptions correct for directory uploads** — two bugs affected
+  releases posted as directories (e.g. DVD `VIDEO_TS/` trees):
+
+  1. *Wire name stripping*: PAR2 File Descriptions and yEnc subjects now use
+     the path relative to the release root (first component stripped).
+     Download clients place all files in the release folder; `par2 repair`
+     run from inside that folder can now find files without an extra path
+     prefix. File IDs are computed consistently so the pre-sort order and
+     the written packets agree.
+
+  2. *Zero-byte file hash alignment*: files with `size == 0` were never fed
+     to the PAR2 worker, so `worker.finish()` returned one fewer hash than
+     there were files. All File Descriptions for files sorted after the empty
+     file received the wrong `file_len` and md5 values, producing
+     `"Incorrectly sized verification packet"` errors in par2cmdline. The fix
+     inserts a synthetic `FileHashes` entry (md5 of the empty string,
+     `length = 0`) at the correct position without affecting the RS encoder.
+     The IFSC packet for empty files now correctly carries zero checksums, as
+     required by the PAR2 spec.
+
+- **Obfuscated uploads: 0-byte files use their real name on the wire** —
+  download clients identify obfuscated files via md5_16k matching and cannot
+  match empty files. Since a 0-byte file has no content to protect, pesto now
+  publishes it under its real wire name even in `--obfuscate` mode, so the
+  client can at least derive the correct filename from the article subject.
+
 ### Added
+- **Warning for releases containing 0-byte files** — download clients identify
+  obfuscated files by their md5_16k hash and cannot match empty files, so they
+  end up misplaced after download. pesto now emits a `status` warning at the
+  start of the upload listing the affected files and suggesting
+  `--compress=rar` or `--compress=7z` as a clean alternative. The upload
+  proceeds normally; nothing is blocked.
+
 - **`generic-indexer` hook: automatic screenshots for video releases** — when
   the uploaded file is a video (mkv, mp4, m2ts, etc.), the hook now captures
   6 evenly-spaced frames via `ffmpeg` (at 10 / 24 / 38 / 52 / 66 / 80 % of

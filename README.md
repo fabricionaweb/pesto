@@ -198,6 +198,26 @@ a downloader can reconstruct the original layout. Files starting with `.` are
 included; symbolic links are skipped. The `.nzb` is named after the root folder
 (`MyShow.S01.nzb`).
 
+#### DVD / Blu-ray full-disc backups
+
+DVD and Blu-ray structures (e.g. `VIDEO_TS/`) often contain **0-byte
+placeholder files** (e.g. `VTS_02_0.VOB`). Download clients identify obfuscated
+files by their md5_16k hash and cannot match empty files — they will end up with
+the obfuscated name in the wrong location.
+
+pesto emits a warning when it detects 0-byte files in a release. The
+recommended approach for full-disc backups is to use RAR compression, which
+preserves the directory structure and is handled natively by all major download
+clients:
+
+```bash
+pesto --compress=rar --obfuscate ./VIDEO_TS/
+```
+
+Without compression, the download is still correct and complete; only the
+0-byte placeholder(s) need to be moved manually after download, or you can
+use `par2 repair` to reconstruct the full layout from the flat download folder.
+
 ### Multiple files
 
 ```bash
