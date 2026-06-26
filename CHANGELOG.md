@@ -18,6 +18,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `PESTO_NZB_NAME` — value of `--nzb-name` (empty string when not set).
   - `PESTO_OBFUSCATE` — obfuscation mode in use: `none`, `full`, or `paranoid`.
   - `PESTO_PAR2` — PAR2 redundancy percentage (e.g. `10`).
+  - `PESTO_TAGS` — space-separated list of NZB tags set via `--nzb-tag`
+    (empty string when none).
 
 ---
 

@@ -286,7 +286,8 @@ struct Cli {
     /// `PESTO_NZB` and `PESTO_NFO` (which don't exist yet at this point):
     /// `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`,
     /// `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_SERVER`,
-    /// `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`
+    /// `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
+    /// `PESTO_TAGS`
     /// [config: output.pre_hook].
     #[arg(long, value_name = "CMD")]
     pre_hook: Option<String>,
@@ -296,7 +297,7 @@ struct Cli {
     /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
     /// `PESTO_INPUT_PATHS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`,
     /// `PESTO_SERVER`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`,
-    /// `PESTO_PAR2`
+    /// `PESTO_PAR2`, `PESTO_TAGS`
     /// [config: output.post_hook].
     #[arg(long, value_name = "CMD")]
     post_hook: Option<String>,
@@ -580,6 +581,7 @@ async fn run_single_upload(
                 ObfuscateMode::Paranoid => "paranoid",
             };
             let pre_groups_str = config.groups.join(":");
+            let pre_tags_str = config.nzb_tags.join(" ");
             let pre_env = HookEnv {
                 nzb_path: None,
                 nfo_path: None,
@@ -594,6 +596,7 @@ async fn run_single_upload(
                 nzb_name: config.nzb_name.as_deref(),
                 obfuscate: pre_obfuscate,
                 par2: config.par2,
+                tags: &pre_tags_str,
             };
             run_pre_hook(cmd, &pre_env)?;
         }
@@ -1263,6 +1266,7 @@ async fn run_single_upload(
             ObfuscateMode::Paranoid => "paranoid",
         };
         let post_groups_str = config.groups.join(":");
+        let post_tags_str = config.nzb_tags.join(" ");
         let hook_env = HookEnv {
             nzb_path: nzb_reported_path.as_deref(),
             nfo_path: nfo_path.as_deref(),
@@ -1277,6 +1281,7 @@ async fn run_single_upload(
             nzb_name: config.nzb_name.as_deref(),
             obfuscate: post_obfuscate,
             par2: config.par2,
+            tags: &post_tags_str,
         };
 
         if !config.no_hooks {
@@ -1519,6 +1524,7 @@ async fn run_batch(
                 ObfuscateMode::Paranoid => "paranoid",
             };
             let season_groups_str = config.groups.join(":");
+            let season_tags_str = config.nzb_tags.join(" ");
             let hook_env = HookEnv {
                 nzb_path: Some(&season_path),
                 nfo_path: nfo_path.as_deref(),
@@ -1533,6 +1539,7 @@ async fn run_batch(
                 nzb_name: config.nzb_name.as_deref(),
                 obfuscate: season_obfuscate,
                 par2: config.par2,
+                tags: &season_tags_str,
             };
             // Skip hooks for --dry-run / --par2-only, matching the per-entry
             // path: no real upload happened, so post-upload hooks must not fire.
@@ -2360,6 +2367,8 @@ struct HookEnv<'a> {
     nzb_name: Option<&'a str>,
     obfuscate: &'a str,
     par2: u8,
+    /// Space-separated list of NZB tags (empty string when none).
+    tags: &'a str,
 }
 
 fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
@@ -2374,6 +2383,7 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
     child.env("PESTO_NZB_NAME", env.nzb_name.unwrap_or(""));
     child.env("PESTO_OBFUSCATE", env.obfuscate);
     child.env("PESTO_PAR2", env.par2.to_string());
+    child.env("PESTO_TAGS", env.tags);
     child.env(
         "PESTO_NZB",
         env.nzb_path
