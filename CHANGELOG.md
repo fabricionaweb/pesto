@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Hook environment variables expanded** — post-upload and pre-upload hooks
+  now receive five additional variables alongside the existing set:
+  - `PESTO_CATEGORY` — value of `--nzb-category` (empty string when not set);
+    useful for passing the Newznab category code directly to indexer API calls
+    without parsing the NZB file.
+  - `PESTO_GROUPS` — colon-separated list of all newsgroups (previously only
+    `PESTO_GROUP` exposed the first one).
+  - `PESTO_NZB_NAME` — value of `--nzb-name` (empty string when not set).
+  - `PESTO_OBFUSCATE` — obfuscation mode in use: `none`, `full`, or `paranoid`.
+  - `PESTO_PAR2` — PAR2 redundancy percentage (e.g. `10`).
+
 ---
 
 ## [0.3.31] — 2026-06-25

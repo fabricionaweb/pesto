@@ -5,8 +5,9 @@
 //! only the directory scripts — `post_hook` still runs regardless.
 //!
 //! Each hook receives the same environment variables:
-//! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_SERVER`, `PESTO_GROUP`,
-//! `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`.
+//! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
+//! `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
+//! `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
